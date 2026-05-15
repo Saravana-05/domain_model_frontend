@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(Get-ChildItem -Path \"G:\\\\form-engine\" -Recurse -File -Name)",
+      "PowerShell(head -30)",
+      "Bash(npm run *)",
+      "mcp__Claude_in_Chrome__tabs_context_mcp",
+      "Bash(find \"G:\\\\skiode_lambda_backend\" -type f -name \"*.py\" | head -20)",
+      "Bash(npx tsc *)"
+    ]
+  }
+}
