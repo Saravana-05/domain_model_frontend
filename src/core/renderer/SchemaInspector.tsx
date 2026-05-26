@@ -440,7 +440,7 @@ interface DomainModelTabProps {
   schemas:       AllSchemas;
   viewConfigs:   Record<string, DomainViewConfig>;
   onAddField:    (domainName: string, fieldName: string, draft: FieldDraft) => void;
-  onEditField:   (domainName: string, fieldName: string, draft: FieldDraft) => void;
+  onEditField:   (domainName: string, oldName: string, newName: string, draft: FieldDraft) => void;
   onViewConfig:  (domainName: string, cfg: DomainViewConfig) => void;
   onSaveBackend: (domainName: string) => void;
 }
@@ -554,12 +554,12 @@ function DomainModelTab({
                               </div>
                               <FieldBuilder
                                 key={`${domainName}.${fieldName}`}
-                                submitLabel={`Update ${fieldName}`}
+                                submitLabel="Save changes"
                                 initialName={fieldName}
                                 initialDraft={fieldDefToDraft(fieldDef, schemas, fp)}
                                 registry={registry}
-                                onSubmit={(name, draft) => {
-                                  onEditField(domainName, name, draft);
+                                onSubmit={(newName, draft) => {
+                                  onEditField(domainName, fieldName, newName, draft);
                                   setEditing(null);
                                 }}
                                 onCancel={() => setEditing(null)}
@@ -1413,8 +1413,7 @@ function FieldBuilder({ submitLabel, initialName = "", initialDraft, onSubmit, o
             Field name *
             <input className="si-form-input" value={fieldName}
               onChange={(e) => setFieldName(e.target.value)}
-              placeholder="e.g. phoneNumber"
-              readOnly={!!initialName} />
+              placeholder="e.g. phoneNumber" />
           </label>
           <label className="si-form-label">
             Type
@@ -2281,42 +2280,101 @@ export function SchemaInspector({ schemas }: { schemas: AllSchemas }) {
     setTimeout(() => setBackendLoadStatus(null), 5000);
   }
 
-  /** Edit an existing field — updates React state then syncs the full domain schema to the backend */
-  async function handleEditField(domainName: string, fieldName: string, draft: FieldDraft) {
+  /** Edit an existing field — supports rename. Updates React state then syncs to backend. */
+  async function handleEditField(domainName: string, oldName: string, newName: string, draft: FieldDraft) {
     const updatedField = draftToDomainFieldCore(draft);
     const uiHint       = draftToUIHint(draft);
     const abac         = draftToABACRule(draft);
     const rbac         = draftToRBACRule(draft);
-    const fullPath     = `${domainName}.${fieldName}`;
+    const oldPath      = `${domainName}.${oldName}`;
+    const newPath      = `${domainName}.${newName}`;
+    const isRename     = oldName !== newName;
 
-    // 1. Update React state
-    setExtra((prev) => ({
-      ...prev,
-      extraFields: {
-        ...prev.extraFields,
-        [domainName]: {
-          ...(prev.extraFields[domainName] ?? {}),
-          [fieldName]: updatedField,
-        },
-      },
-      uiHints:   Object.values(uiHint).some((v) => v !== undefined)
-        ? { ...prev.uiHints, [fullPath]: uiHint } : prev.uiHints,
-      abacRules: abac ? { ...prev.abacRules, [fullPath]: abac } : prev.abacRules,
-      rbacRules: rbac ? { ...prev.rbacRules, [fullPath]: rbac } : prev.rbacRules,
-    }));
+    // Determine whether this domain lives in newDomains (loaded from backend / created this session)
+    // BEFORE the state update so we can also use this for the backend payload.
+    const domainInNewDomains = extra.newDomains.find((d) => d.name === domainName);
 
-    // 2. Build the full updated domain (base fields + edited field) and push once to backend
+    // 1. Update React state ─────────────────────────────────────────────────
+    setExtra((prev) => {
+      // ── uiHints ───────────────────────────────────────────────────────────
+      const uiHints = { ...prev.uiHints };
+      if (isRename && uiHints[oldPath]) { uiHints[newPath] = uiHints[oldPath]; delete uiHints[oldPath]; }
+      if (Object.values(uiHint).some((v) => v !== undefined)) uiHints[newPath] = uiHint;
+
+      // ── abacRules ─────────────────────────────────────────────────────────
+      const abacRules = { ...prev.abacRules };
+      if (isRename && abacRules[oldPath]) { abacRules[newPath] = abacRules[oldPath]; delete abacRules[oldPath]; }
+      if (abac) abacRules[newPath] = abac;
+
+      // ── rbacRules ─────────────────────────────────────────────────────────
+      const rbacRules = { ...prev.rbacRules };
+      if (isRename && rbacRules[oldPath]) { rbacRules[newPath] = rbacRules[oldPath]; delete rbacRules[oldPath]; }
+      if (rbac) rbacRules[newPath] = rbac;
+
+      if (prev.newDomains.some((d) => d.name === domainName)) {
+        // ── Domain is in newDomains — update it directly so mergeAll never
+        //    sees both the old key (from newDomains) AND the new key (from
+        //    extraFields) at the same time, which would produce a duplicate field.
+        const updatedNewDomains = prev.newDomains.map((d) => {
+          if (d.name !== domainName) return d;
+          const fields = { ...d.fields };
+          if (isRename) delete fields[oldName];
+          fields[newName] = updatedField;
+          return { ...d, fields };
+        });
+
+        // Clean up any stale extraFields entries for this domain/field so
+        // they don't shadow the authoritative newDomains data.
+        const domainExtraFields = { ...(prev.extraFields[domainName] ?? {}) };
+        if (isRename) delete domainExtraFields[oldName];
+        delete domainExtraFields[newName];
+
+        return {
+          ...prev,
+          newDomains:  updatedNewDomains,
+          extraFields: { ...prev.extraFields, [domainName]: domainExtraFields },
+          uiHints,
+          abacRules,
+          rbacRules,
+        };
+      } else {
+        // ── Domain is from the static base schema — use extraFields as before
+        const domainFields = { ...(prev.extraFields[domainName] ?? {}) };
+        if (isRename) delete domainFields[oldName];
+        domainFields[newName] = updatedField;
+
+        return {
+          ...prev,
+          extraFields: { ...prev.extraFields, [domainName]: domainFields },
+          uiHints,
+          abacRules,
+          rbacRules,
+        };
+      }
+    });
+
+    // 2. Build the full updated domain and push to backend ──────────────────
+    // Use raw DomainFieldCore data from newDomains (when available) rather than
+    // the compiled DomainFieldDef from liveSchemas so we don't send extra runtime
+    // properties back to the API.
     try {
-      const existingFields = liveSchemas.domains[domainName]?.fields ?? {};
-      const updatedFields  = { ...existingFields, [fieldName]: updatedField };
-      const updatedUIHints = {
-        ...(liveSchemas.uiHints ?? {}),
-        ...(Object.values(uiHint).some((v) => v !== undefined) ? { [fullPath]: uiHint } : {}),
-      };
+      let rawFields: Record<string, DomainFieldCore>;
+      if (domainInNewDomains) {
+        rawFields = { ...domainInNewDomains.fields };
+      } else {
+        // Base-schema domain: grab the extra fields we have accumulated
+        rawFields = { ...(extra.extraFields[domainName] ?? {}) } as Record<string, DomainFieldCore>;
+      }
+      if (isRename) delete rawFields[oldName];
+      rawFields[newName] = updatedField;
+
+      const updatedUIHints = { ...(liveSchemas.uiHints ?? {}) };
+      if (isRename && updatedUIHints[oldPath]) { updatedUIHints[newPath] = updatedUIHints[oldPath]; delete updatedUIHints[oldPath]; }
+      if (Object.values(uiHint).some((v) => v !== undefined)) updatedUIHints[newPath] = uiHint;
 
       const req = domainToBackendRequest({
         domainName,
-        fields:    updatedFields as any,
+        fields:    rawFields as any,
         uiHints:   updatedUIHints as any,
         rbacRules: extra.rbacRules as any,
         abacRules: extra.abacRules as any,
@@ -2324,7 +2382,8 @@ export function SchemaInspector({ schemas }: { schemas: AllSchemas }) {
       const res = await apiCreateDomain(req);
       if (res.status === "success") {
         const action = res.table_created ? "created" : "schema updated";
-        setBackendLoadStatus(`✅ Field "${fieldName}" saved — table "${domainName}" ${action} in ${dbLocation(res)}.`);
+        const label  = isRename ? `"${oldName}" → "${newName}"` : `"${newName}"`;
+        setBackendLoadStatus(`✅ Field ${label} saved — table "${domainName}" ${action} in ${dbLocation(res)}.`);
       } else {
         setBackendLoadStatus(`⚠️ Field saved locally, but backend error: ${res.message}`);
       }
@@ -2508,7 +2567,7 @@ export function SchemaInspector({ schemas }: { schemas: AllSchemas }) {
           schemas={liveSchemas}
           viewConfigs={extra.viewConfigs}
           onAddField={handleAddFieldToExisting}
-          onEditField={handleEditField}
+          onEditField={(domainName, oldName, newName, draft) => handleEditField(domainName, oldName, newName, draft)}
           onViewConfig={handleViewConfig}
           onSaveBackend={handleSaveDomainToBackend}
         />
