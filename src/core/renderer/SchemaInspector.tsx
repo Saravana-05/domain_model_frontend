@@ -1,4 +1,5 @@
 import React, { useState, useMemo, useEffect, useRef } from "react";
+import { useAuthStore } from "../../store/authStore";
 import StorageIcon              from "@mui/icons-material/Storage";
 import PaletteOutlinedIcon      from "@mui/icons-material/PaletteOutlined";
 import CheckCircleOutlinedIcon  from "@mui/icons-material/CheckCircleOutlined";
@@ -74,10 +75,12 @@ interface ExtraSchemaState {
   abacRules: Record<string, ABACFieldRule>;
   /** Domain-level view configuration — domain name → DomainViewConfig */
   viewConfigs: Record<string, DomainViewConfig>;
+  /** Which DB backend each domain is stored in — domain name → "postgresql" | "dynamodb" */
+  dbBackends: Record<string, string>;
 }
 
 const EMPTY_EXTRA: ExtraSchemaState = {
-  newDomains: [], extraFields: {}, uiHints: {}, rbacRules: {}, abacRules: {}, viewConfigs: {},
+  newDomains: [], extraFields: {}, uiHints: {}, rbacRules: {}, abacRules: {}, viewConfigs: {}, dbBackends: {},
 };
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -439,6 +442,7 @@ function ViewConfigForm({ domainName, current, fieldNames, onChange }: ViewConfi
 interface DomainModelTabProps {
   schemas:       AllSchemas;
   viewConfigs:   Record<string, DomainViewConfig>;
+  dbBackends:    Record<string, string>;
   onAddField:    (domainName: string, fieldName: string, draft: FieldDraft) => void;
   onEditField:   (domainName: string, oldName: string, newName: string, draft: FieldDraft) => void;
   onViewConfig:  (domainName: string, cfg: DomainViewConfig) => void;
@@ -446,10 +450,11 @@ interface DomainModelTabProps {
 }
 
 function DomainModelTab({
-  schemas, viewConfigs,
+  schemas, viewConfigs, dbBackends,
   onAddField, onEditField, onViewConfig, onSaveBackend,
 }: DomainModelTabProps) {
-  const registry = schemas._layers?.validationRegistry ?? {};
+  const registry      = schemas._layers?.validationRegistry ?? {};
+  const hasPermission = useAuthStore((s) => s.hasPermission);
   const [editing, setEditing] = useState<{ domain: string; field: string } | null>(null);
 
   return (
@@ -466,6 +471,12 @@ function DomainModelTab({
               <span className="si-domain-name">{domainName}</span>
               <span className="si-field-count">{fieldNames.length} fields</span>
               <span className="si-layer-tag si-layer-tag--domain">Domain Model</span>
+              {dbBackends[domainName] && (
+                <Badge
+                  label={dbBackends[domainName] === "dynamodb" ? "DynamoDB" : "PostgreSQL"}
+                  color={dbBackends[domainName] === "dynamodb" ? "orange" : "teal"}
+                />
+              )}
               <button
                 className="si-icon-btn si-icon-btn--cloud"
                 type="button"
@@ -532,15 +543,19 @@ function DomainModelTab({
                             : <span className="si-muted">—</span>}
                         </td>
                         <td>
-                          <button
-                            className={`si-edit-btn ${isEditing ? "si-edit-btn--active" : ""}`}
-                            type="button"
-                            onClick={() => setEditing(isEditing ? null : { domain: domainName, field: fieldName })}
-                            title="Edit field"
-                          >
-                            <EditOutlinedIcon sx={{ fontSize: 13 }} />
-                            {isEditing ? "Close" : "Edit"}
-                          </button>
+                          {hasPermission(domainName, "edit") ? (
+                            <button
+                              className={`si-edit-btn ${isEditing ? "si-edit-btn--active" : ""}`}
+                              type="button"
+                              onClick={() => setEditing(isEditing ? null : { domain: domainName, field: fieldName })}
+                              title="Edit field"
+                            >
+                              <EditOutlinedIcon sx={{ fontSize: 13 }} />
+                              {isEditing ? "Close" : "Edit"}
+                            </button>
+                          ) : (
+                            <span style={{ fontSize: 12, color: "#9ca3af" }} title="No edit permission">🔒</span>
+                          )}
                         </td>
                       </tr>
                       {/* ── Inline edit row ── */}
@@ -595,16 +610,18 @@ function DomainModelTab({
               </AddSection>
             </div>
 
-            {/* ── Add Field section ── */}
-            <div className="si-card-footer">
-              <AddSection label={`Add field to "${domainName}"`}>
-                <FieldBuilder
-                  submitLabel={`Add to ${domainName}`}
-                  registry={registry}
-                  onSubmit={(fieldName, draft) => onAddField(domainName, fieldName, draft)}
-                />
-              </AddSection>
-            </div>
+            {/* ── Add Field section — only when edit permission granted ── */}
+            {hasPermission(domainName, "edit") && (
+              <div className="si-card-footer">
+                <AddSection label={`Add field to "${domainName}"`}>
+                  <FieldBuilder
+                    submitLabel={`Add to ${domainName}`}
+                    registry={registry}
+                    onSubmit={(fieldName, draft) => onAddField(domainName, fieldName, draft)}
+                  />
+                </AddSection>
+              </div>
+            )}
           </div>
         );
       })}
@@ -1756,10 +1773,12 @@ export interface CreateDomainPayload {
   uiHints:   Record<string, FieldUIConfig>;
   rbacRules: Record<string, RBACFieldRule>;
   abacRules: Record<string, ABACFieldRule>;
+  dbBackend: "postgresql" | "dynamodb";
 }
 
 function CreateDomainTab({ onAdd, registry = {} }: CreateDomainTabProps) {
   const [domainName, setDomainName] = useState("");
+  const [dbBackend,  setDbBackend]  = useState<"postgresql" | "dynamodb">("postgresql");
   const [fields,     setFields]     = useState<Record<string, FieldDraft>>({});
   const [generated,  setGenerated]  = useState(false);
 
@@ -1791,12 +1810,12 @@ function CreateDomainTab({ onAdd, registry = {} }: CreateDomainTabProps) {
       // Always store the label so it round-trips correctly from the DB
       uiHints[`${domainName}.${n}`] = { label: d.label || n };
     }
-    return { domain: { name: domainName, fields: domainFields }, uiHints, rbacRules: {}, abacRules: {} };
+    return { domain: { name: domainName, fields: domainFields }, uiHints, rbacRules: {}, abacRules: {}, dbBackend };
   }
 
   /**
    * Single action: saves schema to backend DB AND adds to live React schema.
-   * Works with both DynamoDB and PostgreSQL depending on server DB_BACKEND.
+   * Works with both DynamoDB and PostgreSQL depending on dbBackend selection.
    */
   async function createDomain() {
     if (!canCreate) return;
@@ -1809,6 +1828,7 @@ function CreateDomainTab({ onAdd, registry = {} }: CreateDomainTabProps) {
       uiHints:    payload.uiHints    as any,
       rbacRules:  payload.rbacRules  as any,
       abacRules:  payload.abacRules  as any,
+      db_backend: dbBackend,
     });
 
     try {
@@ -1854,9 +1874,9 @@ function CreateDomainTab({ onAdd, registry = {} }: CreateDomainTabProps) {
       </div>
 
       <div className="si-add-form">
-        {/* Step 1: Domain name */}
+        {/* Step 1: Domain name + DB selection */}
         <div className="si-step">
-          <div className="si-step-label">Step 1 — Domain name</div>
+          <div className="si-step-label">Step 1 — Domain name &amp; storage</div>
           <div className="si-form-row">
             <label className="si-form-label" style={{ maxWidth: 280 }}>
               camelCase, e.g. <code>product</code>
@@ -1868,6 +1888,37 @@ function CreateDomainTab({ onAdd, registry = {} }: CreateDomainTabProps) {
               />
             </label>
             {domainName && !validName && <span className="si-inline-error">Use camelCase starting with a lowercase letter</span>}
+          </div>
+          <div className="si-form-sublabel" style={{ marginBottom: 8 }}>Select database backend</div>
+          <div className="si-db-selector">
+            <label className={`si-db-option ${dbBackend === "postgresql" ? "si-db-option--active" : ""}`}>
+              <input
+                type="radio"
+                name="dbBackend"
+                value="postgresql"
+                checked={dbBackend === "postgresql"}
+                onChange={() => setDbBackend("postgresql")}
+              />
+              <StorageIcon sx={{ fontSize: 18, color: dbBackend === "postgresql" ? "#0f766e" : "#6b7280" }} />
+              <span className="si-db-option-text">
+                <strong>PostgreSQL</strong>
+                <span className="si-hint">Relational, fast queries</span>
+              </span>
+            </label>
+            <label className={`si-db-option ${dbBackend === "dynamodb" ? "si-db-option--active" : ""}`}>
+              <input
+                type="radio"
+                name="dbBackend"
+                value="dynamodb"
+                checked={dbBackend === "dynamodb"}
+                onChange={() => setDbBackend("dynamodb")}
+              />
+              <StorageIcon sx={{ fontSize: 18, color: dbBackend === "dynamodb" ? "#c2410c" : "#6b7280" }} />
+              <span className="si-db-option-text">
+                <strong>DynamoDB</strong>
+                <span className="si-hint">AWS NoSQL, auto-scale</span>
+              </span>
+            </label>
           </div>
         </div>
 
@@ -1915,11 +1966,13 @@ function CreateDomainTab({ onAdd, registry = {} }: CreateDomainTabProps) {
 
         {/* Step 3: Create Domain */}
         <div className="si-step">
-          <div className="si-step-label">Step 3 — Create domain in DynamoDB</div>
+          <div className="si-step-label">
+            Step 3 — Create domain in {dbBackend === "dynamodb" ? "DynamoDB" : "PostgreSQL"}
+          </div>
 
           <div className="si-create-explainer">
             <CloudUploadOutlinedIcon sx={{ fontSize: 15 }} />
-            One click: creates the table in your database (DynamoDB <strong>or</strong> PostgreSQL) <strong>and</strong> adds it to the live schema.
+            One click: creates the table in <strong>{dbBackend === "dynamodb" ? "AWS DynamoDB" : "PostgreSQL"}</strong> <strong>and</strong> adds it to the live schema.
           </div>
 
           <div className="si-form-actions si-form-actions--gap">
@@ -1980,13 +2033,20 @@ function CreateDomainTab({ onAdd, registry = {} }: CreateDomainTabProps) {
 // Data Tab — Insert rows + view rows from DynamoDB
 // ════════════════════════════════════════════════════════════════════════════
 
-function DataTab({ schemas }: { schemas: AllSchemas }) {
-  const domainNames = Object.keys(schemas.domains);
+function DataTab({ schemas, dbBackends = {} }: { schemas: AllSchemas; dbBackends?: Record<string, string> }) {
+  const domainNames    = Object.keys(schemas.domains);
+  const hasPermission  = useAuthStore((s) => s.hasPermission);
   const [selectedDomain, setSelectedDomain] = useState(domainNames[0] ?? "");
   const [formValues,     setFormValues]     = useState<Record<string, string>>({});
   const [rows,           setRows]           = useState<Record<string, any>[] | null>(null);
   const [status,         setStatus]         = useState<{ state: "idle" | "loading" | "ok" | "err"; msg: string }>({ state: "idle", msg: "" });
   const [loadingRows,    setLoadingRows]    = useState(false);
+
+  const activeBackend = dbBackends[selectedDomain] ?? "postgresql";
+  const dbLabel = activeBackend === "dynamodb" ? "DynamoDB" : "PostgreSQL";
+
+  const canCreate = !selectedDomain || hasPermission(selectedDomain, "create");
+  const canView   = !selectedDomain || hasPermission(selectedDomain, "view");
 
   const domainFields = selectedDomain ? Object.entries(schemas.domains[selectedDomain]?.fields ?? {}) : [];
 
@@ -2058,17 +2118,24 @@ function DataTab({ schemas }: { schemas: AllSchemas }) {
           {domainNames.length === 0 ? (
             <span className="si-data-empty-hint">No domains yet — create one in "Create Domain" tab first.</span>
           ) : (
-            domainNames.map((name) => (
-              <button
-                key={name}
-                type="button"
-                className={`si-data-pill ${selectedDomain === name ? "si-data-pill--active" : ""}`}
-                onClick={() => selectDomain(name)}
-              >
-                <StorageIcon sx={{ fontSize: 12 }} />
-                {name}
-              </button>
-            ))
+            domainNames.map((name) => {
+              const backend = dbBackends[name] ?? "postgresql";
+              return (
+                <button
+                  key={name}
+                  type="button"
+                  className={`si-data-pill ${selectedDomain === name ? "si-data-pill--active" : ""}`}
+                  onClick={() => selectDomain(name)}
+                >
+                  <StorageIcon sx={{ fontSize: 12 }} />
+                  {name}
+                  <Badge
+                    label={backend === "dynamodb" ? "DynamoDB" : "PostgreSQL"}
+                    color={backend === "dynamodb" ? "orange" : "teal"}
+                  />
+                </button>
+              );
+            })
           )}
         </div>
       </div>
@@ -2080,8 +2147,13 @@ function DataTab({ schemas }: { schemas: AllSchemas }) {
             <div className="si-data-section-title">
               <AddIcon sx={{ fontSize: 14 }} />
               Insert a new row into <strong>{selectedDomain}</strong>
+              <Badge label={dbLabel} color={activeBackend === "dynamodb" ? "orange" : "teal"} />
             </div>
-            {domainFields.length === 0 ? (
+            {!canCreate ? (
+              <p className="si-data-empty-hint" style={{ color: "#b91c1c" }}>
+                🔒 You don't have <strong>create</strong> permission for <strong>{selectedDomain}</strong>.
+              </p>
+            ) : domainFields.length === 0 ? (
               <p className="si-data-empty-hint">This domain has no fields defined yet.</p>
             ) : (
               <div className="si-data-form">
@@ -2148,20 +2220,26 @@ function DataTab({ schemas }: { schemas: AllSchemas }) {
                 Rows in <strong>{selectedDomain}</strong>
                 {rows !== null && <span className="si-tab-count">{rows.length}</span>}
               </span>
-              <button
-                type="button"
-                className="btn btn-backend"
-                onClick={loadRows}
-                disabled={loadingRows}
-                style={{ fontSize: 12, padding: "4px 10px" }}
-              >
-                {loadingRows ? <><span className="si-spinner" /> Loading…</> : <><CloudDownloadOutlinedIcon sx={{ fontSize: 13 }} /> Load Rows</>}
-              </button>
+              {canView && (
+                <button
+                  type="button"
+                  className="btn btn-backend"
+                  onClick={loadRows}
+                  disabled={loadingRows}
+                  style={{ fontSize: 12, padding: "4px 10px" }}
+                >
+                  {loadingRows ? <><span className="si-spinner" /> Loading…</> : <><CloudDownloadOutlinedIcon sx={{ fontSize: 13 }} /> Load Rows</>}
+                </button>
+              )}
             </div>
 
-            {rows === null ? (
+            {!canView ? (
+              <div className="si-data-empty-hint" style={{ padding: "20px 0", color: "#b91c1c" }}>
+                🔒 You don't have <strong>view</strong> permission for <strong>{selectedDomain}</strong>.
+              </div>
+            ) : rows === null ? (
               <div className="si-data-empty-hint" style={{ padding: "20px 0" }}>
-                Click <strong>Load Rows</strong> to fetch data from DynamoDB.
+                Click <strong>Load Rows</strong> to fetch data from {dbLabel}.
               </div>
             ) : rows.length === 0 ? (
               <div className="si-data-empty-hint" style={{ padding: "20px 0" }}>
@@ -2220,7 +2298,14 @@ export function SchemaInspector({ schemas }: { schemas: AllSchemas }) {
   const [extra, setExtra] = useState<ExtraSchemaState>(EMPTY_EXTRA);
   const [backendLoadStatus, setBackendLoadStatus] = useState<string | null>(null);
 
-  const liveSchemas = useMemo(() => mergeAll(schemas, extra), [schemas, extra]);
+  // Strip hardcoded domains — domain models come only from the backend.
+  // Validations, UI config, access rules, datasources etc. are kept as-is.
+  const baseSchemas = useMemo(
+    () => ({ ...schemas, domains: {} as typeof schemas.domains }),
+    [schemas],
+  );
+
+  const liveSchemas = useMemo(() => mergeAll(baseSchemas, extra), [baseSchemas, extra]);
 
   // Auto-load domains from the backend the first time the component mounts.
   // Uses a ref-guard so strict-mode double-invocation doesn't cause duplicate toasts.
@@ -2400,9 +2485,10 @@ export function SchemaInspector({ schemas }: { schemas: AllSchemas }) {
         ...prev.newDomains.filter((d) => d.name !== payload.domain.name),
         payload.domain,
       ],
-      uiHints:   { ...prev.uiHints,   ...payload.uiHints   },
-      rbacRules: { ...prev.rbacRules, ...payload.rbacRules },
-      abacRules: { ...prev.abacRules, ...payload.abacRules },
+      uiHints:    { ...prev.uiHints,   ...payload.uiHints   },
+      rbacRules:  { ...prev.rbacRules, ...payload.rbacRules },
+      abacRules:  { ...prev.abacRules, ...payload.abacRules },
+      dbBackends: { ...prev.dbBackends, [payload.domain.name]: payload.dbBackend },
     }));
   }
 
@@ -2486,12 +2572,14 @@ export function SchemaInspector({ schemas }: { schemas: AllSchemas }) {
               }])
             ),
           };
+          const dbBackend = (entry as any).db_backend ?? "postgresql";
           next = {
             ...next,
             newDomains: [...next.newDomains.filter((d) => d.name !== converted.domainName), domainDef],
-            uiHints:   { ...next.uiHints,   ...converted.uiHints   },
-            rbacRules: { ...next.rbacRules, ...converted.rbacRules },
-            abacRules: { ...next.abacRules, ...converted.abacRules },
+            uiHints:    { ...next.uiHints,   ...converted.uiHints   },
+            rbacRules:  { ...next.rbacRules, ...converted.rbacRules },
+            abacRules:  { ...next.abacRules, ...converted.abacRules },
+            dbBackends: { ...next.dbBackends, [converted.domainName]: dbBackend },
           };
         }
         return next;
@@ -2566,6 +2654,7 @@ export function SchemaInspector({ schemas }: { schemas: AllSchemas }) {
         <DomainModelTab
           schemas={liveSchemas}
           viewConfigs={extra.viewConfigs}
+          dbBackends={extra.dbBackends}
           onAddField={handleAddFieldToExisting}
           onEditField={(domainName, oldName, newName, draft) => handleEditField(domainName, oldName, newName, draft)}
           onViewConfig={handleViewConfig}
@@ -2593,7 +2682,7 @@ export function SchemaInspector({ schemas }: { schemas: AllSchemas }) {
         />
       )}
       {tab === "create" && <CreateDomainTab onAdd={handleDomainCreated} registry={liveSchemas._layers?.validationRegistry ?? {}} />}
-      {tab === "data"   && <DataTab schemas={liveSchemas} />}
+      {tab === "data"   && <DataTab schemas={liveSchemas} dbBackends={extra.dbBackends} />}
     </div>
   );
 }

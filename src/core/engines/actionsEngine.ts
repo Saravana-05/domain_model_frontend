@@ -1,4 +1,5 @@
 import type { ActionDef } from "../schema/types";
+import { useAuthStore } from "../../store/authStore";
 
 export interface ActionResult {
   success: boolean;
@@ -19,10 +20,14 @@ export async function executeAction(
           ? data
           : (data[action.payload] ?? {});
 
+      const token = useAuthStore.getState().token;
+      const headers: Record<string, string> = { "Content-Type": "application/json" };
+      if (token) headers["Authorization"] = `Bearer ${token}`;
+
       try {
         const res = await fetch(action.url!, {
           method:  action.method ?? "POST",
-          headers: { "Content-Type": "application/json" },
+          headers,
           body:    JSON.stringify(payload),
         });
         const response = res.headers.get("content-type")?.includes("application/json")

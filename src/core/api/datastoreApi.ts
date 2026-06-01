@@ -5,7 +5,17 @@
  * Docs:    https://bzpfusv4ugqui3ysdnx2j53iyy0kefvt.lambda-url.ap-south-1.on.aws/docs
  */
 
-const API_BASE = import.meta.env.VITE_API_URL ?? "https://ab2dgab6euwc4d2f3dkgddmxiu0mmuxx.lambda-url.ap-south-1.on.aws";
+import { useAuthStore } from "../../store/authStore";
+
+const API_BASE = import.meta.env.VITE_API_URL || "https://ab2dgab6euwc4d2f3dkgddmxiu0mmuxx.lambda-url.ap-south-1.on.aws";
+
+// Static token injected at build time (e.g. sky-view-builder sets VITE_API_TOKEN in its .env)
+const STATIC_TOKEN: string = import.meta.env.VITE_API_TOKEN || "";
+
+/** Resolve auth token: Zustand session first, then build-time env token. */
+function resolveToken(): string | null {
+  return useAuthStore.getState().token || STATIC_TOKEN || null;
+}
 
 // ════════════════════════════════════════════════════════════════════════════
 // Backend wire types (match the FastAPI SchemaField Pydantic model)
@@ -31,6 +41,7 @@ export interface BackendSchemaField {
 export interface BackendCreateRequest {
   table_name: string;
   schema:     BackendSchemaField[];
+  db_backend?: "dynamodb" | "postgresql";
 }
 
 export interface BackendCreateResponse {
@@ -50,6 +61,7 @@ export interface BackendCreateResponse {
 export interface BackendSchemaEntry {
   table_name: string;
   schema:     BackendSchemaField[];
+  db_backend?: "dynamodb" | "postgresql";
 }
 
 export interface BackendSchemasListResponse {
@@ -106,19 +118,20 @@ export function backendTypeToFrontend(type: BackendFieldType): string {
  * unchanged and returns them in GET /schemas responses.
  */
 export function domainToBackendRequest(params: {
-  domainName: string;
-  fields:     Record<string, {
+  domainName:  string;
+  fields:      Record<string, {
     type:         string;
     default?:     any;
     datasource?:  string;
     validations?: Array<{ type: string; value?: any; message: string }>;
     [key: string]: any;            // allow DomainFieldCore to pass through untyped
   }>;
-  uiHints?:   Record<string, Record<string, any>>;   // full-path keys
-  rbacRules?: Record<string, Record<string, any>>;   // full-path keys
-  abacRules?: Record<string, Record<string, any>>;   // full-path keys
+  uiHints?:    Record<string, Record<string, any>>;   // full-path keys
+  rbacRules?:  Record<string, Record<string, any>>;   // full-path keys
+  abacRules?:  Record<string, Record<string, any>>;   // full-path keys
+  db_backend?: "dynamodb" | "postgresql";              // which DB to store data in
 }): BackendCreateRequest {
-  const { domainName, fields, uiHints = {}, rbacRules = {}, abacRules = {} } = params;
+  const { domainName, fields, uiHints = {}, rbacRules = {}, abacRules = {}, db_backend } = params;
 
   const schema: BackendSchemaField[] = Object.entries(fields).map(([fieldName, fieldDef]) => {
     const path = `${domainName}.${fieldName}`;
@@ -150,7 +163,9 @@ export function domainToBackendRequest(params: {
     return field;
   });
 
-  return { table_name: domainName, schema };
+  const req: BackendCreateRequest = { table_name: domainName, schema };
+  if (db_backend) req.db_backend = db_backend;
+  return req;
 }
 
 /**
@@ -197,11 +212,15 @@ export function backendSchemaToFrontend(entry: BackendSchemaEntry): {
 // ════════════════════════════════════════════════════════════════════════════
 
 async function apiFetch(path: string, init?: RequestInit): Promise<any> {
-  const res = await fetch(`${API_BASE}${path}`, {
-    headers: { "Content-Type": "application/json" },
-    ...init,
-  });
+  const token = resolveToken();
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  if (token) headers["Authorization"] = `Bearer ${token}`;
+
+  const res = await fetch(`${API_BASE}${path}`, { headers, ...init });
   if (!res.ok) {
+    if (res.status === 401) {
+      useAuthStore.getState().logout();
+    }
     const text = await res.text().catch(() => res.statusText);
     throw new Error(`API ${res.status}: ${text}`);
   }
