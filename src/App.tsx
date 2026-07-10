@@ -93,7 +93,7 @@ export default function App() {
           <>
             <div style={styles.pageHeader}>
               <div>
-                <h1 style={styles.pageTitle}>Schema Inspector</h1>
+                <h1 style={styles.pageTitle}>Domain Model Configurator</h1>
                 <p style={styles.pageSub}>
                   Domain Model · UI Configuration · Access Control · Validation Registry
                 </p>

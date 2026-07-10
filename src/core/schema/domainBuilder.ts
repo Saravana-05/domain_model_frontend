@@ -68,12 +68,21 @@ export function buildSchemas(input: BuildSchemasInput): AllSchemas {
       const fullPath = `${domainName}.${fieldName}`;
 
       // Stripped core stored in AllSchemas.domains
-      domainFields[fieldName] = {
+      // For relation fields we also preserve relatedDomain so the
+      // Domain Model tab can render the reference badge.
+      const fieldEntry: DomainFieldDef = {
         type:     fieldDef.type,
         default:  fieldDef.default,
         computed: fieldDef.computed,
         format:   fieldDef.format,
       };
+      if (fieldDef.type === "relation" && fieldDef.relatedDomain) {
+        fieldEntry.relatedDomain = fieldDef.relatedDomain;
+      }
+      if (fieldDef.type === "list" && fieldDef.listDomain) {
+        fieldEntry.listDomain = fieldDef.listDomain;
+      }
+      domainFields[fieldName] = fieldEntry;
 
       // Resolve validationRefs from registry, then append inline validations
       const resolved: ValidationRule[] = [];

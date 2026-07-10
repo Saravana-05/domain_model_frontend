@@ -1,4 +1,4 @@
-export type FieldType     = "string" | "number" | "boolean" | "date";
+export type FieldType = "string" | "number" | "boolean" | "date" | "list" | "image";
 export type ComponentType = "text" | "number" | "select" | "checkbox" | "textarea" | "date";
 export type FieldFormat   = "email" | "phone" | "url" | "currency" | "percentage";
 export type HttpMethod    = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
@@ -77,6 +77,17 @@ export interface DomainFieldCore {
   computed?:        boolean;
   /** Datasource key for select/autocomplete fields (moved from UI layer) */
   datasource?:      string;
+  /**
+   * When type === "relation", the name of the domain this field references.
+   * Acts like a foreign-key pointer to another domain model.
+   */
+  relatedDomain?:   string;
+  /**
+   * When type === "list", the name of the domain whose IDs this field stores.
+   * Stores string[] of record IDs at runtime. Auto-created as
+   * parentDomain_fieldName when the target domain does not yet exist.
+   */
+  listDomain?:      string;
   // Reusable rules — resolved from ValidationRegistry at build time
   validationRefs?:  string[];
   // Inline one-off rules (appended after refs)
@@ -204,10 +215,12 @@ export interface BuildSchemasInput {
 // ════════════════════════════════════════════════════════════════════════════
 
 export interface DomainFieldDef {
-  type:      FieldType;
-  default?:  any;
-  computed?: boolean;
-  format?:   FieldFormat;
+  type:           FieldType;
+  default?:       any;
+  computed?:      boolean;
+  format?:        FieldFormat;
+  relatedDomain?: string;
+  listDomain?:    string;
 }
 
 export interface DomainDef {
@@ -287,6 +300,8 @@ export interface ResolvedField {
   placeholder?:  string;
   props?:        Record<string, any>;
   datasource?:   string;
+  relatedDomain?: string;
+  listDomain?:    string;
   validations:   ValidationRule[];
   access?:       AccessRule;
   computedConfig?: ComputedConfig;

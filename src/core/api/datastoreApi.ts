@@ -28,6 +28,7 @@ export interface BackendSchemaField {
   type:          BackendFieldType;
   label:         string;
   value?:        any;              // default value
+  cardinality?:  string;           // "list" = multi-value field
   // Extended metadata stored via model_config extra: allow
   component?:    string;
   placeholder?:  string;
@@ -42,6 +43,7 @@ export interface BackendCreateRequest {
   table_name: string;
   schema:     BackendSchemaField[];
   db_backend?: "dynamodb" | "postgresql";
+  versioned?: boolean;
 }
 
 export interface BackendCreateResponse {
@@ -55,6 +57,7 @@ export interface BackendCreateResponse {
   pg_db?:        string;     // PostgreSQL: database name
   total_fields?: number;
   columns?:      { field_id: string; label: string; type: string }[];
+  versioned?:    boolean;
   message?:      string;
 }
 
@@ -62,6 +65,7 @@ export interface BackendSchemaEntry {
   table_name: string;
   schema:     BackendSchemaField[];
   db_backend?: "dynamodb" | "postgresql";
+  versioned?: boolean;
 }
 
 export interface BackendSchemasListResponse {
@@ -130,8 +134,9 @@ export function domainToBackendRequest(params: {
   rbacRules?:  Record<string, Record<string, any>>;   // full-path keys
   abacRules?:  Record<string, Record<string, any>>;   // full-path keys
   db_backend?: "dynamodb" | "postgresql";              // which DB to store data in
+  versioned?:  boolean;                                 // enable version history for this domain
 }): BackendCreateRequest {
-  const { domainName, fields, uiHints = {}, rbacRules = {}, abacRules = {}, db_backend } = params;
+  const { domainName, fields, uiHints = {}, rbacRules = {}, abacRules = {}, db_backend, versioned } = params;
 
   const schema: BackendSchemaField[] = Object.entries(fields).map(([fieldName, fieldDef]) => {
     const path = `${domainName}.${fieldName}`;
@@ -146,9 +151,10 @@ export function domainToBackendRequest(params: {
       value:    fieldDef.default ?? null,
     };
 
-    if (fieldDef.datasource) field.datasource = fieldDef.datasource;
-    if (ui?.component)       field.component  = ui.component;
-    if (ui?.placeholder)     field.placeholder = ui.placeholder;
+    if (fieldDef.datasource)  field.datasource  = fieldDef.datasource;
+    if (fieldDef.cardinality) field.cardinality = fieldDef.cardinality;
+    if (ui?.component)        field.component   = ui.component;
+    if (ui?.placeholder)      field.placeholder = ui.placeholder;
 
     // Persist inline validation rules so the Form plugin can run them client-side
     if (Array.isArray(fieldDef.validations) && fieldDef.validations.length > 0) {
@@ -165,6 +171,7 @@ export function domainToBackendRequest(params: {
 
   const req: BackendCreateRequest = { table_name: domainName, schema };
   if (db_backend) req.db_backend = db_backend;
+  if (versioned !== undefined) req.versioned = versioned;
   return req;
 }
 
@@ -177,8 +184,9 @@ export function backendSchemaToFrontend(entry: BackendSchemaEntry): {
   uiHints:    Record<string, Record<string, any>>;
   rbacRules:  Record<string, Record<string, any>>;
   abacRules:  Record<string, Record<string, any>>;
+  versioned:  boolean;
 } {
-  const { table_name, schema } = entry;
+  const { table_name, schema, versioned } = entry;
   const fields:    Record<string, any> = {};
   const uiHints:   Record<string, any> = {};
   const rbacRules: Record<string, any> = {};
@@ -188,9 +196,10 @@ export function backendSchemaToFrontend(entry: BackendSchemaEntry): {
     const path = `${table_name}.${field.field_id}`;
 
     fields[field.field_id] = {
-      type:      backendTypeToFrontend(field.type),
-      default:   field.value ?? undefined,
-      datasource: field.datasource,
+      type:        backendTypeToFrontend(field.type),
+      default:     field.value ?? undefined,
+      datasource:  field.datasource,
+      cardinality: field.cardinality ?? undefined,
     };
 
     const ui: Record<string, any> = {};
@@ -204,7 +213,7 @@ export function backendSchemaToFrontend(entry: BackendSchemaEntry): {
     if (field.abac && Object.keys(field.abac).length > 0) abacRules[path] = field.abac;
   }
 
-  return { domainName: table_name, fields, uiHints, rbacRules, abacRules };
+  return { domainName: table_name, fields, uiHints, rbacRules, abacRules, versioned: !!versioned };
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -264,4 +273,38 @@ export async function apiListRows(tableName: string): Promise<BackendRowsRespons
 /** GET /datastore/{table_name}/row/{id} — get one row by ID */
 export async function apiGetRow(tableName: string, recordId: string): Promise<any> {
   return apiFetch(`/datastore/${tableName}/row/${recordId}`);
+}
+
+/** POST /datastore/domain-attributes — save a field/attribute for a domain */
+export async function apiSaveAttribute(
+  domainModelId: string,
+  attributeName: string,
+  label?: string,
+  fieldType?: string,
+): Promise<{ status: string; message?: string }> {
+  return apiFetch("/datastore/domain-attributes", {
+    method: "POST",
+    body: JSON.stringify({
+      domain_model_id: domainModelId,
+      attribute_name:  attributeName,
+      label:           label ?? null,
+      field_type:      fieldType ?? null,
+    }),
+  });
+}
+
+/** POST /datastore/domain-attributes/{domain}/{attribute}/translation — save one language's label */
+export async function apiSaveAttributeTranslation(
+  domainModelId: string,
+  attributeName: string,
+  langCode: "en" | "ta" | "ar",
+  label: string,
+): Promise<{ status: string; message?: string; label?: string }> {
+  return apiFetch(
+    `/datastore/domain-attributes/${domainModelId}/${attributeName}/translation`,
+    {
+      method: "POST",
+      body: JSON.stringify({ lang_code: langCode, label }),
+    },
+  );
 }
