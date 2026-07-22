@@ -1,6 +1,9 @@
 import { useAuthStore } from "../../store/authStore";
 
-const API_BASE = import.meta.env.VITE_API_URL || "https://ab2dgab6euwc4d2f3dkgddmxiu0mmuxx.lambda-url.ap-south-1.on.aws";
+// const API_BASE = import.meta.env.VITE_API_URL || "https://ab2dgab6euwc4d2f3dkgddmxiu0mmuxx.lambda-url.ap-south-1.on.aws";
+
+const API_BASE = import.meta.env.VITE_API_URL || "http://localhost:8000";
+
 const STATIC_TOKEN: string = import.meta.env.VITE_API_TOKEN || "";
 
 function authHeaders(): Record<string, string> {

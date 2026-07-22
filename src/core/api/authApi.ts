@@ -1,4 +1,6 @@
-const API_BASE = import.meta.env.VITE_API_URL || "https://ab2dgab6euwc4d2f3dkgddmxiu0mmuxx.lambda-url.ap-south-1.on.aws";
+// const API_BASE = import.meta.env.VITE_API_URL || "https://ab2dgab6euwc4d2f3dkgddmxiu0mmuxx.lambda-url.ap-south-1.on.aws";
+
+const API_BASE = import.meta.env.VITE_API_URL || "http://localhost:8000";
 
 export async function apiLogin(email: string, password: string) {
   const res = await fetch(`${API_BASE}/auth/login`, {
