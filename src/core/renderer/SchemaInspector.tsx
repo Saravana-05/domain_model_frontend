@@ -664,11 +664,11 @@ interface DomainModelTabProps {
   onViewConfig:          (domainName: string, cfg: DomainViewConfig) => void;
   onSaveBackend:         (domainName: string) => void;
   onQuickCreateDomain:   (name: string, fields: QuickCreateField[]) => void;
+  onRedirectToCreate: (domainName: string, parentDomain?: string, fieldName?: string) => void;
 }
-
 function DomainModelTab({
   schemas, viewConfigs, dbBackends, versioned, junctionDomains,
-  onAddField, onEditField, onViewConfig, onSaveBackend, onQuickCreateDomain,
+  onAddField, onEditField, onViewConfig, onSaveBackend, onQuickCreateDomain, onRedirectToCreate,
 }: DomainModelTabProps) {
   const registry      = schemas._layers?.validationRegistry ?? {};
   const hasPermission = useAuthStore((s) => s.hasPermission);
@@ -676,32 +676,12 @@ function DomainModelTab({
   const [expandedChildren, setExpandedChildren] = useState<Record<string, boolean>>({});
   const domainNames   = Object.keys(schemas.domains);
 
-// Build parent → children map
-  // A domain is a child if it has a parentId field (e.g. kaId in ak means ak is child of ka)
+// Show every domain flat at the top level — no parent/child nesting.
   const childrenMap: Record<string, string[]> = {};
-
-  for (const [domainName] of Object.entries(schemas.domains)) {
-    // Check every OTHER domain to see if it has domainNameId field
-    for (const [otherName, otherDef] of Object.entries(schemas.domains)) {
-      if (otherName === domainName) continue;
-      const parentIdField = `${domainName}Id`;
-      const hasParentId = Object.keys(otherDef.fields).includes(parentIdField);
-      if (hasParentId) {
-        // otherName is a child of domainName
-        if (!childrenMap[domainName]) childrenMap[domainName] = [];
-        if (!childrenMap[domainName].includes(otherName)) {
-          childrenMap[domainName].push(otherName);
-        }
-      }
-    }
-  }
-
-  // Domains that appear as children — don't show them at top level
-  const childDomains = new Set(Object.values(childrenMap).flat());
 
   return (
     <div className="si-domains">
-{Object.keys(schemas.domains).filter((d) => !childDomains.has(d)).map((domainName) => {
+{Object.keys(schemas.domains).map((domainName) => {
         const fields     = schemas.domains[domainName].fields;
         const fieldNames = Object.keys(fields);
         const viewCfg    = viewConfigs[domainName] ?? {};
@@ -831,20 +811,21 @@ function DomainModelTab({
                                 Editing field <strong>{fieldName}</strong> in domain <strong>{domainName}</strong>
                               </div>
                               <FieldBuilder
-                                key={`${domainName}.${fieldName}`}
-                                submitLabel="Save changes"
-                                initialName={fieldName}
-                                initialDraft={fieldDefToDraft(fieldDef, schemas, fp)}
-                                registry={registry}
-                                domainNames={domainNames}
-                                parentDomainName={domainName}
-                                onNewDomainFromRelation={onQuickCreateDomain}
-                                onSubmit={(newName, draft) => {
-                                  onEditField(domainName, fieldName, newName, draft);
-                                  setEditing(null);
-                                }}
-                                onCancel={() => setEditing(null)}
-                              />
+  key={`${domainName}.${fieldName}`}
+  submitLabel="Save changes"
+  initialName={fieldName}
+  initialDraft={fieldDefToDraft(fieldDef, schemas, fp)}
+  registry={registry}
+  domainNames={domainNames}
+  parentDomainName={domainName}
+  onNewDomainFromRelation={onQuickCreateDomain}
+  onRedirectToCreate={onRedirectToCreate}
+  onSubmit={(newName, draft) => {
+    onEditField(domainName, fieldName, newName, draft);
+    setEditing(null);
+  }}
+  onCancel={() => setEditing(null)}
+/>
                             </div>
                           </td>
                         </tr>
@@ -902,13 +883,14 @@ function DomainModelTab({
                           <div style={{ padding: "0 12px 12px 12px" }}>
                             <AddSection label={`Add field to "${childName}"`}>
                               <FieldBuilder
-                                submitLabel={`Add to ${childName}`}
-                                registry={registry}
-                                domainNames={domainNames}
-                                parentDomainName={childName}
-                                onNewDomainFromRelation={onQuickCreateDomain}
-                                onSubmit={(fieldName, draft) => onAddField(childName, fieldName, draft)}
-                              />
+  submitLabel={`Add to ${childName}`}
+  registry={registry}
+  domainNames={domainNames}
+  parentDomainName={childName}
+  onNewDomainFromRelation={onQuickCreateDomain}
+  onRedirectToCreate={onRedirectToCreate}
+  onSubmit={(fieldName, draft) => onAddField(childName, fieldName, draft)}
+/>
                             </AddSection>
                           </div>
                         </div>
@@ -938,13 +920,14 @@ function DomainModelTab({
               <div className="si-card-footer">
                 <AddSection label={`Add field to "${domainName}"`}>
                   <FieldBuilder
-                    submitLabel={`Add to ${domainName}`}
-                    registry={registry}
-                    domainNames={domainNames}
-                    parentDomainName={domainName}
-                    onNewDomainFromRelation={onQuickCreateDomain}
-                    onSubmit={(fieldName, draft) => onAddField(domainName, fieldName, draft)}
-                  />
+  submitLabel={`Add to ${domainName}`}
+  registry={registry}
+  domainNames={domainNames}
+  parentDomainName={domainName}
+  onNewDomainFromRelation={onQuickCreateDomain}
+  onRedirectToCreate={onRedirectToCreate}
+  onSubmit={(fieldName, draft) => onAddField(domainName, fieldName, draft)}
+/>
                 </AddSection>
               </div>
             )}
@@ -1552,7 +1535,15 @@ export interface FieldDraft {
   relatedDomain:  string;
   cardinality:    string;
   listDomain:     string;
-  isPartOf:       boolean;
+  /**
+   * Relation kind:
+   *  - true   → Parent → Child: FK column added into the RELATED (child) domain
+   *  - false  → Many-to-Many: junction table created
+   *  - "fk"   → Belongs-to: the CURRENT domain gets a real `${relatedDomain}Id`
+   *             column referencing an EXISTING related domain (no modal, no
+   *             junction table — e.g. consultation.patientId → patient)
+   */
+  isPartOf:       boolean | "fk";
   validationRefs: string[];
   validations:    DraftValidation[];
   exprStr:        string;
@@ -1956,12 +1947,13 @@ interface FieldBuilderProps {
   domainNames?:   string[];
   parentDomainName?: string;
   onNewDomainFromRelation?: (name: string, fields: QuickCreateField[]) => void;
+  onRedirectToCreate?: (domainName: string, parentDomain?: string, fieldName?: string) => void;
 }
 
 function FieldBuilder({
   submitLabel, initialName = "", initialDraft, onSubmit, onCancel,
   showAllLayers = true, showLabelOnly = false, registry = {}, domainNames = [],
-  parentDomainName = "", onNewDomainFromRelation,
+  parentDomainName = "", onNewDomainFromRelation, onRedirectToCreate,
 }: FieldBuilderProps) {
 const [fieldName, setFieldName] = useState(initialName);
   const [enFieldName, setEnFieldName] = useState(initialName);
@@ -1969,8 +1961,7 @@ const [fieldName, setFieldName] = useState(initialName);
   const [draftVal,  setDraftVal]  = useState<DraftValidation>({ type: "required", value: "", message: "" });
   const [modalOpen, setModalOpen] = useState(false);
   const [labelLang, setLabelLang] = useState<"en" | "ta" | "ar">("en");
-  const isPartOfRef = useRef<boolean>(true);
-  const [miniModalOpen, setMiniModalOpen] = useState(false);
+  const isPartOfRef = useRef<boolean | "fk">(true);
 
 
 
@@ -2026,8 +2017,7 @@ if (!initialName) {
   setEnFieldName(""); 
   setLabelLang("en"); 
   setDraft({ ...BLANK_DRAFT }); 
-  setMiniModalOpen(false);
-}  }
+}   }
 
   return (
     <div className="si-field-builder">
@@ -2041,9 +2031,17 @@ if (!initialName) {
               className="si-form-input"
               value={fieldName}
               onChange={(e) => {
-                setFieldName(e.target.value);
-                setEnFieldName(e.target.value);
-                if (showLabelOnly) setLabelForLang("en", e.target.value);
+                const val = e.target.value;
+                setFieldName(val);
+                setEnFieldName(val);
+                if (showLabelOnly) setLabelForLang("en", val);
+                if (draft.type === "relation") {
+                  set("relatedDomain", val.trim());
+                  if (val.trim() && domainNames.includes(val.trim())) {
+                    isPartOfRef.current = "fk";
+                    set("isPartOf", "fk");
+                  }
+                }
               }}
               placeholder="e.g. name"
             />
@@ -2062,8 +2060,16 @@ if (!initialName) {
                   set("listDomain", "");
                 }
                 if (selectedType === "relation") {
-                  if (fieldName.trim()) {
-                    set("relatedDomain", fieldName.trim());
+                  const related = fieldName.trim();
+                  if (related) {
+                    set("relatedDomain", related);
+                    // ✅ Domain already exists → this is a simple belongs-to FK.
+                    // No junction table, no modal — just add it as a field and
+                    // it will be saved as `${related}Id` referencing that domain.
+                    if (domainNames.includes(related)) {
+                      isPartOfRef.current = "fk";
+                      set("isPartOf", "fk");
+                    }
                   }
                 }
               }}
@@ -2087,28 +2093,36 @@ if (!initialName) {
             </label>
 
           {draft.type === "relation" && draft.relatedDomain && (
-            <div style={{ display:"flex", alignItems:"flex-end", gap:6 }}>
-              {domainNames.includes(draft.relatedDomain) ? (
-                <button type="button" className="btn btn-primary" onClick={() => setMiniModalOpen(true)}
-                  style={{ whiteSpace:"nowrap", fontSize:12 }}>
-                  <LinkOutlinedIcon sx={{ fontSize: 13 }} />
-                  Create junction table
-                </button>
-              ) : (
-                <button type="button" className="btn btn-primary" onClick={() => setMiniModalOpen(true)}
-                  style={{ whiteSpace:"nowrap", fontSize:12 }}>
-                  <AddIcon sx={{ fontSize: 13 }} />
-                  Create {draft.relatedDomain} domain
-                </button>
-              )}
-              <button type="button"
-                onClick={() => { set("relatedDomain",""); set("listDomain",""); set("type","string"); }}
-                style={{ fontSize:13, color:"#9ca3af", background:"none", border:"none",
-                  cursor:"pointer", lineHeight:1, padding:"0 4px" }}>
-                ×
-              </button>
-            </div>
-          )}
+  <div style={{ display:"flex", alignItems:"flex-end", gap:6 }}>
+    {domainNames.includes(draft.relatedDomain) ? (
+      // ✅ Domain already exists — nothing to create. This will be
+      // saved as a plain FK column (`${relatedDomain}Id`) on THIS
+      // domain, referencing the existing one. No modal needed.
+      <span style={{
+        display:"inline-flex", alignItems:"center", gap:6,
+        whiteSpace:"nowrap", fontSize:12, padding:"7px 10px",
+        background:"#eef2ff", border:"1px solid #a5b4fc",
+        borderRadius:"var(--border-radius-md)", color:"#3730a3",
+      }}>
+        <LinkOutlinedIcon sx={{ fontSize: 13 }} />
+        Links to existing <strong>{draft.relatedDomain}</strong> (adds <code>{draft.relatedDomain}Id</code> here)
+      </span>
+    ) : (
+<button type="button" className="btn btn-primary" 
+  onClick={() => onRedirectToCreate?.(draft.relatedDomain, parentDomainName, fieldName)}
+  style={{ whiteSpace:"nowrap", fontSize:12 }}>
+  <AddIcon sx={{ fontSize: 13 }} />
+  Create {draft.relatedDomain} domain
+</button>
+    )}
+    <button type="button"
+      onClick={() => { set("relatedDomain",""); set("listDomain",""); set("type","string"); set("isPartOf", true); isPartOfRef.current = true; }}
+      style={{ fontSize:13, color:"#9ca3af", background:"none", border:"none",
+        cursor:"pointer", lineHeight:1, padding:"0 4px" }}>
+      ×
+    </button>
+  </div>
+)}
          
          
         </div>
@@ -2143,41 +2157,7 @@ if (!initialName) {
           <button className="btn btn-secondary" type="button" onClick={onCancel}>Cancel</button>
         )}
       </div>
-<MiniRelationModal
-        open={miniModalOpen}
-        mode={domainNames.includes(draft.relatedDomain) ? "junction" : "create"}
-        domainName={draft.relatedDomain}
-        parentDomainName={parentDomainName}
-        onClose={() => setMiniModalOpen(false)}
-       onConfirmCreate={(miniFields, isParentChild) => {
-          onNewDomainFromRelation?.(draft.relatedDomain, miniFields);
-          isPartOfRef.current = isParentChild;
-          const finalDraft: FieldDraft = {
-            ...draft,
-            isPartOf: isParentChild,
-            relatedDomain: draft.relatedDomain,
-          };
-          if (fieldName.trim()) {
-            onSubmit(fieldName.trim(), finalDraft);
-          }
-          setMiniModalOpen(false);
-          if (!initialName) {
-            setFieldName("");
-            setEnFieldName("");
-            setDraft({ ...BLANK_DRAFT });
-          }
-        }}
-        onConfirmJunction={(isParentChild) => {
-          isPartOfRef.current = isParentChild;
-          set("isPartOf", isParentChild);
-          setMiniModalOpen(false);
-          if (!initialName) {
-            setFieldName("");
-            setEnFieldName("");
-            setDraft({ ...BLANK_DRAFT });
-          }
-        }}
-      />
+
       <LinkDomainModal
         open={modalOpen}
         onClose={() => setModalOpen(false)}
@@ -2277,6 +2257,9 @@ interface CreateDomainTabProps {
   domainNames?: string[];
   onQuickCreateDomain?: (name: string, fields: QuickCreateField[]) => void;
   schemas?: AllSchemas;
+  initialDomainName?: string; // NEW
+  onRedirectToCreate?: (domainName: string) => void; // NEW
+  pendingFK?: { parentDomain: string; childDomain: string; fkFieldName: string } | null; // NEW
 }
 export interface CreateDomainPayload {
   domain:    DomainDefinition;
@@ -2292,8 +2275,15 @@ export interface CreateDomainPayload {
   /** Per-field, per-language labels — keyed by field name (not full path) */
   fieldLabels?: Record<string, Record<"en" | "ta" | "ar", string>>;
 }
-function CreateDomainTab({ onAdd, registry = {}, domainNames = [], onQuickCreateDomain, schemas }: CreateDomainTabProps) {
-  const [domainName, setDomainName] = useState("");
+function CreateDomainTab({ onAdd, registry = {}, domainNames = [], onQuickCreateDomain, schemas, initialDomainName, onRedirectToCreate, pendingFK }: CreateDomainTabProps) {
+  const [domainName, setDomainName] = useState(initialDomainName || "");
+  
+  // Update domain name when initialDomainName changes
+  useEffect(() => {
+    if (initialDomainName) {
+      setDomainName(initialDomainName);
+    }
+  }, [initialDomainName]);
   const [dbBackend,  setDbBackend]  = useState<"postgresql" | "dynamodb">("postgresql");
   const [fields,     setFields]     = useState<Record<string, FieldDraft>>({});
   const [generated,  setGenerated]  = useState(false);
@@ -2339,6 +2329,24 @@ function buildPayload(): CreateDomainPayload {
     const rbacRules: Record<string, RBACFieldRule>      = {};
     const abacRules: Record<string, ABACFieldRule>      = {};
     for (const [n, d] of Object.entries(fields)) {
+      // ✅ Belongs-to — relation pointing at an EXISTING domain (e.g. patient,
+      // doctor, branch already exist). THIS domain gets a real FK column
+      // `${relatedDomain}Id` (e.g. patientId) instead of a literal "patient"
+      // column. No junction table, no column on the related domain.
+      if (d.type === "relation" && d.relatedDomain && !d.relatedDomain.startsWith("__new__:") && d.isPartOf === "fk") {
+        const fkFieldName = `${d.relatedDomain}Id`;
+        // Keep type "relation" + relatedDomain locally so the UI still shows
+        // the 🔗 badge / domain-picker; converted to "string" for the actual
+        // backend column just before the create-domain API call.
+        domainFields[fkFieldName] = { type: "relation", relatedDomain: d.relatedDomain };
+        const fp = `${domainName}.${fkFieldName}`;
+        const hint = draftToUIHint(d);
+        uiHints[fp] = Object.keys(hint).length ? hint : { label: primaryLabel(d.labels, fkFieldName) };
+        const rbac = draftToRBACRule(d); if (rbac) rbacRules[fp] = rbac;
+        const abac = draftToABACRule(d); if (abac) abacRules[fp] = abac;
+        continue;
+      }
+
       domainFields[n] = draftToDomainFieldCore(d);
       const fp = `${domainName}.${n}`;
 
@@ -2368,11 +2376,15 @@ function buildPayload(): CreateDomainPayload {
     const relatedDomains:  DomainDefinition[] = [];
 for (const [, d] of Object.entries(fields)) {
       if (d.type === "relation" && d.relatedDomain && !d.relatedDomain.startsWith("__new__:")) {
+        // ✅ Already handled as a belongs-to FK in the loop above (fkFieldName
+        // added directly to THIS domain's fields). Never touch the related
+        // domain in that case — no new child domain, no stray column.
+        if (d.isPartOf === "fk") continue;
+
         const parentIdField = `${domainName}Id`;
-        const existingFieldCount = Object.keys(
-          schemas?.domains?.[d.relatedDomain]?.fields ?? {}
-        ).length;
-        const relatedAlreadyExists = domainNames.includes(d.relatedDomain) && existingFieldCount > 0;
+        // Existence check based purely on domainNames — no fragile
+        // field-count heuristic that can misfire on stale schema data.
+        const relatedAlreadyExists = domainNames.includes(d.relatedDomain);
 
         if (!relatedAlreadyExists) {
           const rd: DomainDefinition = {
@@ -2385,6 +2397,13 @@ for (const [, d] of Object.entries(fields)) {
         }
       }
     }
+
+    // 🔥 NEW: Add pending FK if it matches this domain
+if (pendingFK && pendingFK.childDomain === domainName) {
+  domainFields[pendingFK.fkFieldName] = { type: "string" };
+  const fp = `${domainName}.${pendingFK.fkFieldName}`;
+  uiHints[fp] = { label: pendingFK.fkFieldName };
+}
 
 const fieldLabels: Record<string, Record<"en" | "ta" | "ar", string>> = {};
     for (const [n, d] of Object.entries(fields)) fieldLabels[n] = d.labels;
@@ -2399,10 +2418,17 @@ return { domain: { name: domainName, fields: domainFields }, uiHints, rbacRules,
     const payload = buildPayload();
     const messages: string[] = [];
 
-    // 1. Create main domain table
+    const backendFields: Record<string, DomainFieldCore> = Object.fromEntries(
+      Object.entries(payload.domain.fields)
+      
+        .filter(([k, f]) => !(f.type === "relation" && f.relatedDomain && k !== `${f.relatedDomain}Id`))
+        .map(([k, f]) => [
+          k, f.type === "relation" ? { ...f, type: "string" as FieldType } : f,
+        ])
+    );
 const req = domainToBackendRequest({
       domainName: payload.domain.name,
-      fields:     payload.domain.fields as any,
+      fields:     backendFields as any,
       uiHints:    payload.uiHints    as any,
       rbacRules:  payload.rbacRules  as any,
       abacRules:  payload.abacRules  as any,
@@ -2470,9 +2496,12 @@ const req = domainToBackendRequest({
       }
     }
 
-// ✅ Always add parentId column to child table for relation fields
+// ✅ Add parentId column to child table — only for relation fields whose
+    // related domain did NOT already exist (a genuinely new parent → child
+    // relationship). Existing domains (belongs-to / fk case) are left
+    // untouched — the FK already lives on THIS domain as `${relatedDomain}Id`.
     for (const [, d] of Object.entries(fields)) {
-      if (d.type === "relation" && d.relatedDomain && !d.relatedDomain.startsWith("__new__:")) {
+      if (d.type === "relation" && d.relatedDomain && !d.relatedDomain.startsWith("__new__:") && !domainNames.includes(d.relatedDomain)) {
         const parentIdField = `${domainName}Id`;
         try {
           const childExistingFields: Record<string, DomainFieldCore> = {
@@ -2624,9 +2653,12 @@ const req = domainToBackendRequest({
                           </td>
                         </tr>
 
-                        {/* ── Child domain tree row ── */}
+                        {/* ── Relation preview row ── */}
                         
-                        {isRelation && expandedFields[name] && (
+                        {isRelation && expandedFields[name] && (() => {
+                          const relatedExists = domainNames.includes(d.relatedDomain);
+                          const fkFieldName = relatedExists ? `${d.relatedDomain}Id` : parentIdField;
+                          return (
                           <tr>
                             <td colSpan={8} style={{ padding: "0 0 0 24px", background: "var(--color-background-secondary)" }}>
                               <div style={{
@@ -2636,7 +2668,7 @@ const req = domainToBackendRequest({
                                 overflow: "hidden",
                                 background: "var(--color-background-primary)",
                               }}>
-                                {/* Child domain header */}
+                                {/* Header */}
                                 <div style={{
                                   display: "flex", alignItems: "center", gap: 8,
                                   padding: "8px 12px",
@@ -2651,14 +2683,16 @@ const req = domainToBackendRequest({
                                     fontSize: 11, background: "#e0e7ff", color: "#3730a3",
                                     borderRadius: 20, padding: "1px 8px", fontWeight: 500,
                                   }}>
-                                    child domain
+                                    {relatedExists ? "existing domain" : "child domain"}
                                   </span>
                                   <span style={{ fontSize: 11, color: "#6b7280", marginLeft: "auto" }}>
-                                    will be created with FK column
+                                    {relatedExists
+                                      ? `no changes to "${d.relatedDomain}"`
+                                      : "will be created with FK column"}
                                   </span>
                                 </div>
 
-                                {/* Child domain fields */}
+                                {/* FK field */}
                                 <table className="si-table" style={{ margin: 0 }}>
                                   <thead>
                                     <tr>
@@ -2668,10 +2702,9 @@ const req = domainToBackendRequest({
                                     </tr>
                                   </thead>
                                   <tbody>
-                                    {/* Auto FK field */}
                                     <tr style={{ background: "#f5f3ff" }}>
                                       <td className="si-field-name" style={{ color: "#4f46e5" }}>
-                                        {parentIdField}
+                                        {fkFieldName}
                                         <span style={{
                                           fontSize: 10, background: "#e0e7ff", color: "#3730a3",
                                           borderRadius: 4, padding: "1px 5px", marginLeft: 6, fontWeight: 600,
@@ -2679,11 +2712,13 @@ const req = domainToBackendRequest({
                                       </td>
                                       <td><Badge label="string" color="purple" /></td>
                                       <td style={{ fontSize: 11, color: "#6366f1" }}>
-                                        Auto-added → references <strong>{domainName}</strong>
+                                        {relatedExists
+                                          ? <>Added to <strong>{domainName}</strong> (this domain) → references <strong>{d.relatedDomain}</strong></>
+                                          : <>Auto-added to <strong>{d.relatedDomain}</strong> → references <strong>{domainName}</strong></>}
                                       </td>
                                     </tr>
-                                    {/* Existing child fields if domain already exists */}
-                                    {Object.entries(schemas?.domains?.[d.relatedDomain]?.fields ?? {}).map(([cf, cfd]) => (
+                                    {/* Existing related fields, shown read-only for context */}
+                                    {relatedExists && Object.entries(schemas?.domains?.[d.relatedDomain]?.fields ?? {}).map(([cf, cfd]) => (
                                       <tr key={cf}>
                                         <td className="si-field-name">{cf}</td>
                                         <td><Badge label={(cfd as any).type} color="purple" /></td>
@@ -2695,7 +2730,8 @@ const req = domainToBackendRequest({
                               </div>
                             </td>
                           </tr>
-                        )}
+                          );
+                        })()}
                       </React.Fragment>
                     );
                   })}
@@ -3088,7 +3124,14 @@ export function SchemaInspector({ schemas }: { schemas: AllSchemas }) {
   const [tab,   setTab]   = useState<MainTab>("domain");
   const [extra, setExtra] = useState<ExtraSchemaState>(EMPTY_EXTRA);
   const [backendLoadStatus, setBackendLoadStatus] = useState<string | null>(null);
-
+  const [pendingDomainName, setPendingDomainName] = useState<string | null>(null);
+  const [pendingParentDomain, setPendingParentDomain] = useState<string | null>(null);
+  const [pendingRelationFieldName, setPendingRelationFieldName] = useState<string | null>(null);
+  const [pendingFK, setPendingFK] = useState<{
+  parentDomain: string;
+  childDomain: string;
+  fkFieldName: string;
+} | null>(null);
   const baseSchemas = useMemo(
     () => ({ ...schemas, domains: {} as typeof schemas.domains }),
     [schemas],
@@ -3097,20 +3140,46 @@ export function SchemaInspector({ schemas }: { schemas: AllSchemas }) {
   const liveSchemas = useMemo(() => mergeAll(baseSchemas, extra), [baseSchemas, extra]);
   const liveDomainNames = useMemo(() => Object.keys(liveSchemas.domains), [liveSchemas]);
 
-  const didAutoLoad = useRef(false);
+const didAutoLoad = useRef(false);
 
-  // ── Quick-create domain from RelationDomainPicker ─────────────────────────
-// AFTER
-// AFTER
+  // ── Local persistence for display-only relation markers ───────────────────
+  // These are fields like clinic.branch (type: "relation", isPartOf: true)
+  // that never become real Postgres columns — the backend has nothing to
+  // return for them, so without this they vanish on every reload/HMR.
+  const RELATION_MARKERS_KEY = "si_relation_markers";
+
+  function loadRelationMarkers(): Record<string, Record<string, DomainFieldCore>> {
+    try {
+      const raw = localStorage.getItem(RELATION_MARKERS_KEY);
+      return raw ? JSON.parse(raw) : {};
+    } catch {
+      return {};
+    }
+  }
+
+  function saveRelationMarker(domainName: string, fieldName: string, field: DomainFieldCore) {
+    try {
+      const all = loadRelationMarkers();
+      all[domainName] = { ...(all[domainName] ?? {}), [fieldName]: field };
+      localStorage.setItem(RELATION_MARKERS_KEY, JSON.stringify(all));
+    } catch { /* ignore quota errors */ }
+  }
+
+  function removeRelationMarker(domainName: string, fieldName: string) {
+    try {
+      const all = loadRelationMarkers();
+      if (all[domainName]) {
+        delete all[domainName][fieldName];
+        if (Object.keys(all[domainName]).length === 0) delete all[domainName];
+        localStorage.setItem(RELATION_MARKERS_KEY, JSON.stringify(all));
+      }
+    } catch { /* ignore */ }
+  }
 async function handleQuickCreateDomain(name: string, fields: QuickCreateField[]) {
   const domainFields: Record<string, DomainFieldCore> = {};
   for (const f of fields) { domainFields[f.name] = { type: f.type }; }
 
-  // Backend auto-creates id — just add a name field so domain isn't empty
-
-
-
-    const domainDef: DomainDefinition = { name, fields: domainFields };
+  const domainDef: DomainDefinition = { name, fields: domainFields };
     setExtra((prev) => ({
       ...prev,
       newDomains: [...prev.newDomains.filter((d) => d.name !== name), domainDef],
@@ -3139,7 +3208,24 @@ async function handleQuickCreateDomain(name: string, fields: QuickCreateField[])
     }
     setTimeout(() => setBackendLoadStatus(null), 4000);
   }
-
+  // ── Redirect to Create Domain tab ─────────────────────────────────────────
+const handleRedirectToCreate = (domainName: string, parentDomain?: string, fieldName?: string) => {
+  setPendingDomainName(domainName);
+  setPendingParentDomain(parentDomain || null);
+  setPendingRelationFieldName(fieldName || null);
+  // ✅ Ensure the parent's FK column gets injected into the new child
+  // domain's fields when it's created, same as the handleAddFieldToExisting
+  // path does. Without this, clicking "Create {domain} domain" straight
+  // from the FieldBuilder button skips FK wiring entirely.
+  if (parentDomain) {
+    setPendingFK({
+      parentDomain,
+      childDomain: domainName,
+      fkFieldName: `${parentDomain}Id`,
+    });
+  }
+  setTab("create");
+};
   // ── Core junction creation helper ─────────────────────────────────────────
 async function ensureJunctionDomain(
   parentDomainName: string,
@@ -3224,8 +3310,15 @@ const domainsToPush = [jd];
 
 setExtra((prev) => ({
       ...prev,
-      // ✅ relation fields never become columns in the parent table
-      extraFields: draft.type === "relation"
+      // Belongs-to FK relations (isPartOf === "fk") skip adding the literal
+      // field name here — the real fkFieldName (e.g. patientId) is added by
+      // the dedicated "fk" branch below instead, so we don't want a
+      // duplicate "patient" field sitting next to "patientId".
+      // New parent→child relations (isPartOf === true) DO get added here —
+      // for relations this is a display-only marker in the parent's field
+      // list (it's never sent to the backend as a real column; the child
+      // domain gets the real FK, handled further below).
+      extraFields: (draft.type === "relation" && draft.isPartOf === "fk")
         ? prev.extraFields
         : { ...prev.extraFields, [domainName]: { ...(prev.extraFields[domainName] ?? {}), [fieldName]: newField } },
       uiHints:     Object.values(uiHint).some((v) => v !== undefined) ? { ...prev.uiHints, [fullPath]: uiHint } : prev.uiHints,
@@ -3248,75 +3341,107 @@ if (draft.type === "relation" && draft.relatedDomain && !draft.relatedDomain.sta
       const dbBackend = extra.dbBackends[domainName] ?? "postgresql";
 console.log("handleAddFieldToExisting — isPartOf:", draft.isPartOf, "domain:", domainName, "related:", draft.relatedDomain);
 
-if (draft.isPartOf) {
-        // ✅ CHECKED — add parentId FK into child (relatedDomain) table
-        const parentIdField = `${domainName}Id`;
+if (draft.isPartOf === "fk") {
+        // ✅ Belongs-to — existing domain, no junction/no modal. THIS domain
+        // (the one being edited, e.g. consultation) gets a real FK column,
+        // e.g. consultation.patientId → patient. The related domain is left
+        // untouched.
+        const fkFieldName = `${draft.relatedDomain}Id`;
+        // Keep type "relation" locally so the UI still shows the 🔗 badge and
+        // renders a domain-picker in the Data tab; the physical DB column is
+        // sent as "string", matching how FK columns are persisted elsewhere.
+        const fkFieldLocal: DomainFieldCore = { type: "relation", relatedDomain: draft.relatedDomain };
         setExtra((prev) => ({
           ...prev,
           extraFields: {
             ...prev.extraFields,
-            [draft.relatedDomain]: {
-              ...(prev.extraFields[draft.relatedDomain] ?? {}),
-              [parentIdField]: { type: "string" },
+            [domainName]: {
+              ...(prev.extraFields[domainName] ?? {}),
+              [fkFieldName]: fkFieldLocal,
             },
           },
         }));
         try {
-          const childExistingFields = liveSchemas.domains[draft.relatedDomain]?.fields ?? {};
-          const childUpdatedFields = {
-            ...childExistingFields,
-            [parentIdField]: { type: "string" as FieldType },
+          const existingFields = liveSchemas.domains[domainName]?.fields ?? {};
+          const updatedFields = {
+            ...existingFields,
+            [fkFieldName]: { type: "string" as FieldType },
           };
           const req = domainToBackendRequest({
-            domainName:  draft.relatedDomain,
-            fields:      childUpdatedFields as any,
-            uiHints:     {},
-            rbacRules:   {},
-            abacRules:   {},
-            db_backend:  dbBackend as any,
+            domainName, fields: updatedFields as any, uiHints: liveSchemas.uiHints as any,
+            rbacRules: extra.rbacRules as any, abacRules: extra.abacRules as any,
           });
           const res = await apiCreateDomain(req);
           if (res.status === "success") {
             setBackendLoadStatus(
-              `✅ "${parentIdField}" added to child table "${draft.relatedDomain}" — ${dbLocation(res)}`
+              `✅ "${fkFieldName}" added to "${domainName}" — FK → "${draft.relatedDomain}" in ${dbLocation(res)}.`
             );
           } else {
-            setBackendLoadStatus(`⚠️ "${parentIdField}" to "${draft.relatedDomain}": ${res.message}`);
+            setBackendLoadStatus(`⚠️ "${fkFieldName}" added locally, but backend: ${res.message}`);
           }
         } catch (err: any) {
-          setBackendLoadStatus(`⚠️ Could not add "${parentIdField}" to "${draft.relatedDomain}": ${err?.message}`);
+          setBackendLoadStatus(`⚠️ Could not add "${fkFieldName}" to "${domainName}": ${err?.message}`);
         }
         setTimeout(() => setBackendLoadStatus(null), 5000);
-      } else {
-        // ❌ UNCHECKED — create junction table
-        await ensureJunctionDomain(domainName, draft.relatedDomain, dbBackend);
-      }
-      
-    }
-    // ✅ skip backend column for relation — handled by child table or junction
-if (draft.type !== "relation") {
-      try {
-        const existingFields = liveSchemas.domains[domainName]?.fields ?? {};
-        const updatedFields  = { ...existingFields, [fieldName]: newField };
-        const updatedUIHints = {
-          ...(liveSchemas.uiHints ?? {}),
-          ...(Object.values(uiHint).some((v) => v !== undefined) ? { [fullPath]: uiHint } : {}),
-        };
-        const req = domainToBackendRequest({
-          domainName, fields: updatedFields as any, uiHints: updatedUIHints as any,
-          rbacRules: extra.rbacRules as any, abacRules: extra.abacRules as any,
-        });
-        const res = await apiCreateDomain(req);
-        if (res.status === "success") {
-          const action = res.table_created ? "created" : "column added";
-          setBackendLoadStatus(`✅ Field "${fieldName}" added to "${domainName}" in ${dbLocation(res)} — ${action}.`);
+     } else if (draft.isPartOf) {
+        // ✅ CHECKED — add parentId FK into child (relatedDomain) table
+        const parentIdField = `${domainName}Id`;
+        // Persist the display-only marker on THIS (parent) domain so it
+        // survives a reload — the backend never sees a real "branch" column.
+        saveRelationMarker(domainName, fieldName, newField);
+        
+        // 🔥 FIX: Check if child domain already exists
+        const childExists = liveSchemas.domains[draft.relatedDomain] !== undefined;
+        
+        if (childExists) {
+          // Child exists — add FK via API call
+          setExtra((prev) => ({
+            ...prev,
+            extraFields: {
+              ...prev.extraFields,
+              [draft.relatedDomain]: {
+                ...(prev.extraFields[draft.relatedDomain] ?? {}),
+                [parentIdField]: { type: "string" },
+              },
+            },
+          }));
+          try {
+            const childExistingFields = liveSchemas.domains[draft.relatedDomain]?.fields ?? {};
+            const childUpdatedFields = {
+              ...childExistingFields,
+              [parentIdField]: { type: "string" as FieldType },
+            };
+            const req = domainToBackendRequest({
+              domainName:  draft.relatedDomain,
+              fields:      childUpdatedFields as any,
+              uiHints:     {},
+              rbacRules:   {},
+              abacRules:   {},
+              db_backend:  dbBackend as any,
+            });
+            const res = await apiCreateDomain(req);
+            if (res.status === "success") {
+              setBackendLoadStatus(
+                `✅ "${parentIdField}" added to child table "${draft.relatedDomain}" — ${dbLocation(res)}`
+              );
+            } else {
+              setBackendLoadStatus(`⚠️ "${parentIdField}" to "${draft.relatedDomain}": ${res.message}`);
+            }
+          } catch (err: any) {
+            setBackendLoadStatus(`⚠️ Could not add "${parentIdField}" to "${draft.relatedDomain}": ${err?.message}`);
+          }
         } else {
-          setBackendLoadStatus(`⚠️ Field added locally, but backend error: ${res.message}`);
+          // 🔥 NEW: Child doesn't exist yet — set pending FK to be added during domain creation
+          setPendingFK({
+            parentDomain: domainName,
+            childDomain: draft.relatedDomain,
+            fkFieldName: parentIdField,
+          });
+          // Redirect to create the child domain
+          onRedirectToCreate?.(draft.relatedDomain, domainName, fieldName);
         }
-      } catch (err: any) {
-        setBackendLoadStatus(`⚠️ Field added locally, but backend unreachable: ${err?.message}`);
+        setTimeout(() => setBackendLoadStatus(null), 5000);
       }
-      setTimeout(() => setBackendLoadStatus(null), 5000);
     }
   }
 
@@ -3349,7 +3474,12 @@ if (draft.type !== "relation") {
           if (d.name !== domainName) return d;
           const fields = { ...d.fields };
           if (isRename) delete fields[oldName];
-          fields[newName] = updatedField;
+          // ✅ relation fields never become columns in the parent domain
+          if (draft.type === "relation") {
+            delete fields[newName];
+          } else {
+            fields[newName] = updatedField;
+          }
           return { ...d, fields };
         });
         const domainExtraFields = { ...(prev.extraFields[domainName] ?? {}) };
@@ -3359,7 +3489,12 @@ if (draft.type !== "relation") {
       } else {
         const domainFields = { ...(prev.extraFields[domainName] ?? {}) };
         if (isRename) delete domainFields[oldName];
-        domainFields[newName] = updatedField;
+        // ✅ relation fields never become columns in the parent domain
+        if (draft.type === "relation") {
+          delete domainFields[newName];
+        } else {
+          domainFields[newName] = updatedField;
+        }
         return { ...prev, extraFields: { ...prev.extraFields, [domainName]: domainFields }, uiHints, abacRules, rbacRules };
       }
     });
@@ -3379,7 +3514,44 @@ if (draft.type === "relation" && draft.relatedDomain && !draft.relatedDomain.sta
       const dbBackend = extra.dbBackends[domainName] ?? "postgresql";
       console.log("HANDLER isPartOf:", draft.isPartOf, "relatedDomain:", draft.relatedDomain);
 
-if (!draft.isPartOf) {
+if (draft.isPartOf === "fk") {
+        // ✅ Belongs-to — existing domain. THIS domain gets a real FK column,
+        // e.g. consultation.patientId → patient. No junction table.
+        const fkFieldName = `${draft.relatedDomain}Id`;
+        const fkFieldLocal: DomainFieldCore = { type: "relation", relatedDomain: draft.relatedDomain };
+        setExtra((prev) => ({
+          ...prev,
+          extraFields: {
+            ...prev.extraFields,
+            [domainName]: {
+              ...(prev.extraFields[domainName] ?? {}),
+              [fkFieldName]: fkFieldLocal,
+            },
+          },
+        }));
+        try {
+          const existingFields = liveSchemas.domains[domainName]?.fields ?? {};
+          const updatedFields = {
+            ...existingFields,
+            [fkFieldName]: { type: "string" as FieldType },
+          };
+          const req = domainToBackendRequest({
+            domainName, fields: updatedFields as any, uiHints: liveSchemas.uiHints as any,
+            rbacRules: extra.rbacRules as any, abacRules: extra.abacRules as any,
+          });
+          const res = await apiCreateDomain(req);
+          if (res.status === "success") {
+            setBackendLoadStatus(
+              `✅ "${fkFieldName}" added to "${domainName}" — FK → "${draft.relatedDomain}" in ${dbLocation(res)}.`
+            );
+          } else {
+            setBackendLoadStatus(`⚠️ "${fkFieldName}" added locally, but backend: ${res.message}`);
+          }
+        } catch (err: any) {
+          setBackendLoadStatus(`⚠️ Could not add "${fkFieldName}" to "${domainName}": ${err?.message}`);
+        }
+        setTimeout(() => setBackendLoadStatus(null), 5000);
+      } else if (!draft.isPartOf) {
         // ❌ UNCHECKED — create junction table
         await ensureJunctionDomain(domainName, draft.relatedDomain, dbBackend);
       } else {
@@ -3433,7 +3605,13 @@ if (!draft.isPartOf) {
         rawFields = { ...(extra.extraFields[domainName] ?? {}) } as Record<string, DomainFieldCore>;
       }
       if (isRename) delete rawFields[oldName];
-      rawFields[newName] = updatedField;
+      // ✅ relation fields never become columns in the parent table —
+      // they're handled via the child FK or the junction table instead.
+      if (draft.type === "relation") {
+        delete rawFields[newName];
+      } else {
+        rawFields[newName] = updatedField;
+      }
 
       const updatedUIHints = { ...(liveSchemas.uiHints ?? {}) };
       if (isRename && updatedUIHints[oldPath]) { updatedUIHints[newPath] = updatedUIHints[oldPath]; delete updatedUIHints[oldPath]; }
@@ -3458,6 +3636,60 @@ if (!draft.isPartOf) {
   }
 
 function handleDomainCreated(payload: CreateDomainPayload) {
+    // Persist display-only relation markers
+    for (const [fieldName, fieldDef] of Object.entries(payload.domain.fields)) {
+      if (fieldDef.type === "relation" && fieldDef.relatedDomain && fieldName !== `${fieldDef.relatedDomain}Id`) {
+        saveRelationMarker(payload.domain.name, fieldName, fieldDef);
+      }
+    }
+    
+    // ✅ Add relation back to parent domain if this was from a redirect
+    if (pendingParentDomain && pendingDomainName && pendingRelationFieldName) {
+      const relationField: DomainFieldCore = {
+        type: "relation",
+        relatedDomain: pendingDomainName,
+      };
+      setExtra((prev) => ({
+        ...prev,
+        extraFields: {
+          ...prev.extraFields,
+          [pendingParentDomain]: {
+            ...(prev.extraFields[pendingParentDomain] ?? {}),
+            [pendingRelationFieldName]: relationField,
+          },
+        },
+      }));
+      // Clear pending state
+      setPendingDomainName(null);
+      setPendingParentDomain(null);
+      setPendingRelationFieldName(null);
+    }
+    
+    // 🔥 NEW: Add pending FK to the new domain if it exists
+    if (pendingFK && pendingFK.childDomain === payload.domain.name) {
+      const updatedFields = {
+        ...payload.domain.fields,
+        [pendingFK.fkFieldName]: { type: "string" as FieldType },
+      };
+      // Update the domain with the FK field
+      payload.domain.fields = updatedFields;
+      
+      // Also add to extraFields to ensure merge works
+      setExtra((prev) => ({
+        ...prev,
+        extraFields: {
+          ...prev.extraFields,
+          [pendingFK.childDomain]: {
+            ...(prev.extraFields[pendingFK.childDomain] ?? {}),
+            [pendingFK.fkFieldName]: { type: "string" },
+          },
+        },
+      }));
+      
+      // Clear pending FK
+      setPendingFK(null);
+    }
+    
     setExtra((prev) => {
       const nextPairs = new Set(prev.junctionPairs);
       const newJunctionDomains: DomainDefinition[] = [];
@@ -3599,6 +3831,26 @@ function handleViewConfig(domainName: string, cfg: DomainViewConfig) {
         }
         return next;
       });
+      // Re-merge display-only relation markers that the backend has no
+      // record of (e.g. clinic.branch) — otherwise they'd vanish here since
+      // this whole function just overwrote newDomains with backend truth.
+      const savedMarkers = loadRelationMarkers();
+      if (Object.keys(savedMarkers).length > 0) {
+        setExtra((prev) => {
+          const nextExtraFields = { ...prev.extraFields };
+          for (const [domName, markerFields] of Object.entries(savedMarkers)) {
+            // Only rehydrate markers for domains that actually exist —
+            // avoids resurrecting stale markers for deleted/renamed domains.
+            const domainKnown =
+              prev.newDomains.some((d) => d.name === domName) ||
+              Object.keys(nextExtraFields).includes(domName);
+            if (!domainKnown) continue;
+            nextExtraFields[domName] = { ...(nextExtraFields[domName] ?? {}), ...markerFields };
+          }
+          return { ...prev, extraFields: nextExtraFields };
+        });
+      }
+
       setBackendLoadStatus(`✅ Loaded ${count} schema(s) from backend.`);
       setTimeout(() => setBackendLoadStatus(null), 4000);
     } catch (err: any) {
@@ -3674,6 +3926,7 @@ function handleViewConfig(domainName: string, cfg: DomainViewConfig) {
           onViewConfig={handleViewConfig}
           onSaveBackend={handleSaveDomainToBackend}
           onQuickCreateDomain={handleQuickCreateDomain}
+          onRedirectToCreate={handleRedirectToCreate}
         />
       )}
       {tab === "ui" && (
@@ -3696,6 +3949,9 @@ function handleViewConfig(domainName: string, cfg: DomainViewConfig) {
           domainNames={liveDomainNames}
           onQuickCreateDomain={handleQuickCreateDomain}
           schemas={liveSchemas}
+          initialDomainName={pendingDomainName || undefined}
+          onRedirectToCreate={handleRedirectToCreate}
+          pendingFK={pendingFK}
         />
       )}
       {tab === "data" && <DataTab schemas={liveSchemas} dbBackends={extra.dbBackends} />}
