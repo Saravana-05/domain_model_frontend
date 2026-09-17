@@ -34,7 +34,7 @@ jobs:
             ${{ env.DOCKERHUB_USER }}/${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
             ${{ env.DOCKERHUB_USER }}/${{ env.IMAGE_NAME }}:latest
           build-args: |
-            VITE_API_URL=${{ secrets.VITE_API_BASE_URL }}
+            VITE_API_URL=${{ secrets.VITE_API_URL }}
 
       - name: Deploy to Server
         uses: appleboy/ssh-action@v1.2.2
