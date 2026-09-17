@@ -6,6 +6,7 @@
  */
 
 import { useAuthStore } from "../../store/authStore";
+import { useProjectStore } from "../store/projectStore";
 
 const API_BASE = import.meta.env.VITE_API_URL || "https://ab2dgab6euwc4d2f3dkgddmxiu0mmuxx.lambda-url.ap-south-1.on.aws";
 
@@ -29,6 +30,9 @@ export interface BackendSchemaField {
   label:         string;
   value?:        any;              // default value
   cardinality?:  string;           // "list" = multi-value field
+  relationKind?: string;           // "integral" | "association"
+  relatedDomain?: string;          // the domain this field's relation points to
+  validationRefs?: string[];       // attached named validation-rule tags
   // Extended metadata stored via model_config extra: allow
   component?:    string;
   placeholder?:  string;
@@ -44,6 +48,11 @@ export interface BackendCreateRequest {
   schema:     BackendSchemaField[];
   db_backend?: "dynamodb" | "postgresql";
   versioned?: boolean;
+  /** Optional — scopes this domain model to a project. If omitted,
+   *  apiCreateDomain() below fills it in from the currently-selected
+   *  project (see ProjectSelector.tsx / projectStore.ts). Pass an
+   *  explicit `null` to force "no project" even if one is selected. */
+  project_id?: string | number | null;
 }
 
 export interface BackendCreateResponse {
@@ -66,6 +75,7 @@ export interface BackendSchemaEntry {
   schema:     BackendSchemaField[];
   db_backend?: "dynamodb" | "postgresql";
   versioned?: boolean;
+  project_id?: string | null;
 }
 
 export interface BackendSchemasListResponse {
@@ -114,6 +124,60 @@ export function backendTypeToFrontend(type: BackendFieldType): string {
   }
 }
 
+// ── Resolving named validation registry rules into flat, form-runnable ones ──
+// Mirrors flattenNamedValidationRule in src/core/schema/domainBuilder.ts —
+// duplicated here (not imported) to keep this API file self-contained. Kept
+// in sync manually; if that function's behavior changes, this one should too.
+
+interface FlatValidationRule {
+  type: string;
+  value?: any;
+  message: string;
+}
+
+function flattenRegistryRule(rule: any, tag: string): FlatValidationRule[] {
+  // Legacy flat shape — already exactly a FlatValidationRule.
+  if (rule.type) {
+    return [{ type: rule.type, value: rule.value, message: rule.message ?? "" }];
+  }
+
+  const desc = rule.description ?? "";
+
+  switch (rule.kind) {
+    case "required":
+      return [{ type: "required", message: desc || "This field is required" }];
+    case "pattern":
+      return rule.expression
+        ? [{ type: "pattern", value: rule.expression, message: desc || "Invalid format" }]
+        : [];
+    case "custom":
+      return rule.expression
+        ? [{ type: "custom", value: rule.expression, message: desc || "Invalid value" }]
+        : [];
+    case "length": {
+      const out: FlatValidationRule[] = [];
+      if (rule.min !== undefined) out.push({ type: "minLength", value: rule.min, message: desc || `At least ${rule.min} characters` });
+      if (rule.max !== undefined) out.push({ type: "maxLength", value: rule.max, message: desc || `At most ${rule.max} characters` });
+      return out;
+    }
+    case "range": {
+      const out: FlatValidationRule[] = [];
+      if (rule.min !== undefined) out.push({ type: "min", value: rule.min, message: desc || `Minimum value is ${rule.min}` });
+      if (rule.max !== undefined) out.push({ type: "max", value: rule.max, message: desc || `Maximum value is ${rule.max}` });
+      return out;
+    }
+    case "cardinality":
+      // Not a scalar-field check — nothing to send to the form runtime for
+      // this one, same reasoning as buildSchemas()'s own handling of it.
+      console.warn(`[domainToBackendRequest] Skipping "${tag}" (kind: cardinality) — not a field-level check, nothing to enforce client-side.`);
+      return [];
+    case "all":
+      return (rule.validations ?? []).flatMap((sub: any) => flattenRegistryRule(sub, tag));
+    default:
+      return [];
+  }
+}
+
 /**
  * Convert a frontend domain definition (all layers) into a backend CreateRequest.
  *
@@ -128,6 +192,7 @@ export function domainToBackendRequest(params: {
     default?:     any;
     datasource?:  string;
     validations?: Array<{ type: string; value?: any; message: string }>;
+    validationRefs?: string[];
     [key: string]: any;            // allow DomainFieldCore to pass through untyped
   }>;
   uiHints?:    Record<string, Record<string, any>>;   // full-path keys
@@ -135,8 +200,13 @@ export function domainToBackendRequest(params: {
   abacRules?:  Record<string, Record<string, any>>;   // full-path keys
   db_backend?: "dynamodb" | "postgresql";              // which DB to store data in
   versioned?:  boolean;                                 // enable version history for this domain
+  /** Named validation registry, needed to resolve each field's
+   *  validationRefs into real rules before sending — without this, a
+   *  field that only has registry refs attached (no inline validations)
+   *  would silently persist NO validations at all. */
+  registry?: Record<string, any>;
 }): BackendCreateRequest {
-  const { domainName, fields, uiHints = {}, rbacRules = {}, abacRules = {}, db_backend, versioned } = params;
+  const { domainName, fields, uiHints = {}, rbacRules = {}, abacRules = {}, db_backend, versioned, registry = {} } = params;
 
   const schema: BackendSchemaField[] = Object.entries(fields).map(([fieldName, fieldDef]) => {
     const path = `${domainName}.${fieldName}`;
@@ -156,9 +226,52 @@ export function domainToBackendRequest(params: {
     if (ui?.component)        field.component   = ui.component;
     if (ui?.placeholder)      field.placeholder = ui.placeholder;
 
-    // Persist inline validation rules so the Form plugin can run them client-side
-    if (Array.isArray(fieldDef.validations) && fieldDef.validations.length > 0) {
-      field.validations = fieldDef.validations;
+    // Persist the composition/reference distinction for FK columns so
+    // consumers (e.g. the view-builder) can tell "part of" relations
+    // (branch belongs to clinic — no link/unlink) apart from plain
+    // reassignable references (doctor/patient belongs to branch).
+    if (fieldDef.relationKind) field.relationKind = fieldDef.relationKind;
+
+    // relatedDomain was missing from this same whitelist — relationKind
+    // ("association"/"integral") was being saved, but the actual target
+    // domain it points to was silently dropped on every save. That's why
+    // a freshly-created or freshly-re-saved relation field could show
+    // relationKind with an empty related_domain_model.linked_with on
+    // export: the backend genuinely never received the value to store.
+    // This is the save-side counterpart to the same gap already fixed in
+    // backendSchemaToFrontend() (the load side).
+    if (fieldDef.relatedDomain) field.relatedDomain = fieldDef.relatedDomain;
+
+    // Resolve registry-attached rules (validationRefs) into real, flat
+    // rules the Form plugin can run — this was the actual gap: only
+    // fieldDef.validations (inline, one-off rules typed directly on the
+    // field) ever made it into the payload before. Clicking a Registry
+    // Rules chip attached a TAG to validationRefs, but that tag was never
+    // looked up or resolved here, so it silently vanished on save.
+    const refRules: FlatValidationRule[] = Array.isArray(fieldDef.validationRefs)
+      ? fieldDef.validationRefs.flatMap((tag: string) => {
+          const rule = registry[tag];
+          if (!rule) {
+            console.warn(`[domainToBackendRequest] Validation tag "${tag}" not found in registry (field: ${path})`);
+            return [];
+          }
+          return flattenRegistryRule(rule, tag);
+        })
+      : [];
+    const inlineRules: FlatValidationRule[] = Array.isArray(fieldDef.validations) ? fieldDef.validations : [];
+    const allValidations = [...refRules, ...inlineRules];
+    if (allValidations.length > 0) field.validations = allValidations;
+
+    // Also persist the raw tag list itself (not just the rules resolved
+    // from it above) — backendSchemaToFrontend() reads validationRefs
+    // back on load to show the actual tag identity (e.g. "required-name")
+    // in the Validation Refs column and the Export tab's JSON. Without
+    // sending it here too, that identity is only ever present for fields
+    // saved before this fix; any field saved through this function keeps
+    // its enforced rules (field.validations still runs fine) but loses
+    // which named tag it came from on the next reload.
+    if (Array.isArray(fieldDef.validationRefs) && fieldDef.validationRefs.length > 0) {
+      field.validationRefs = fieldDef.validationRefs;
     }
 
     // Store full ui_config blob so it round-trips correctly
@@ -180,7 +293,11 @@ export function domainToBackendRequest(params: {
  */
 export function backendSchemaToFrontend(entry: BackendSchemaEntry): {
   domainName: string;
-  fields:     Record<string, { type: string; default?: any; datasource?: string }>;
+  fields:     Record<string, {
+    type: string; default?: any; datasource?: string;
+    cardinality?: string; relationKind?: string;
+    relatedDomain?: string; validationRefs?: string[];
+  }>;
   uiHints:    Record<string, Record<string, any>>;
   rbacRules:  Record<string, Record<string, any>>;
   abacRules:  Record<string, Record<string, any>>;
@@ -196,10 +313,23 @@ export function backendSchemaToFrontend(entry: BackendSchemaEntry): {
     const path = `${table_name}.${field.field_id}`;
 
     fields[field.field_id] = {
-      type:        backendTypeToFrontend(field.type),
-      default:     field.value ?? undefined,
-      datasource:  field.datasource,
-      cardinality: field.cardinality ?? undefined,
+      type:           backendTypeToFrontend(field.type),
+      default:        field.value ?? undefined,
+      datasource:     field.datasource,
+      cardinality:    field.cardinality ?? undefined,
+      relationKind:   field.relationKind ?? undefined,
+      // These two were missing entirely — the raw backend field object
+      // already carries them (see the /datastore/schemas response: each
+      // field has "relatedDomain": "contact" etc. right alongside
+      // relationKind), but this function silently dropped them on the
+      // way into the frontend's field shape. That's why every relation
+      // came back empty on reload/import even though the backend had it
+      // stored correctly all along — downstream code (handleLoadFromBackend
+      // in SchemaInspector.tsx) reads relatedDomain/validationRefs off of
+      // exactly this returned object, so if they're missing here, no
+      // amount of "whitelisting" further downstream can recover them.
+      relatedDomain:  field.relatedDomain ?? undefined,
+      validationRefs: field.validationRefs ?? undefined,
     };
 
     const ui: Record<string, any> = {};
@@ -214,6 +344,27 @@ export function backendSchemaToFrontend(entry: BackendSchemaEntry): {
   }
 
   return { domainName: table_name, fields, uiHints, rbacRules, abacRules, versioned: !!versioned };
+}
+
+export interface BackendValidationRule {
+  tag:          string;
+  version?:     string;
+  description?: string;
+  category?:    string;
+  kind?:        string;
+  type?:        string;
+  value?:       any;
+  message?:     string;
+  expression?:  string;
+  min?:         number;
+  max?:         number;
+  validations?: BackendValidationRule[];
+}
+
+export interface BackendValidationRulesListResponse {
+  status: string;
+  count:  number;
+  rules:  BackendValidationRule[];
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -236,17 +387,41 @@ async function apiFetch(path: string, init?: RequestInit): Promise<any> {
   return res.json();
 }
 
-/** POST /datastore/create — create a DynamoDB table from a schema */
+/**
+ * POST /datastore/create — create a table from a schema.
+ *
+ * If `req.project_id` isn't explicitly set, this scopes the new domain
+ * model to whichever project is currently selected (ProjectSelector.tsx)
+ * — every one of SchemaInspector.tsx's ~10 create-domain call sites gets
+ * project scoping "for free" this way, without each needing to be
+ * touched individually. Pass `project_id: null` explicitly to force
+ * "no project" regardless of what's currently selected.
+ */
 export async function apiCreateDomain(req: BackendCreateRequest): Promise<BackendCreateResponse> {
+  const project_id = req.project_id !== undefined
+    ? req.project_id
+    : useProjectStore.getState().currentProjectId;
+
   return apiFetch("/datastore/create", {
     method: "POST",
-    body:   JSON.stringify(req),
+    body:   JSON.stringify({ ...req, project_id: project_id ?? undefined }),
   });
 }
 
-/** GET /datastore/schemas — list all registered table schemas */
-export async function apiListSchemas(): Promise<BackendSchemasListResponse> {
-  return apiFetch("/datastore/schemas");
+/**
+ * GET /datastore/schemas — list registered table schemas.
+ * Defaults to the currently-selected project (pass `null` explicitly to
+ * force the full unfiltered list regardless of what's selected).
+ */
+export async function apiListSchemas(
+  projectId?: string | null,
+): Promise<BackendSchemasListResponse> {
+  const effectiveId = projectId !== undefined
+    ? projectId
+    : useProjectStore.getState().currentProjectId;
+
+  const query = effectiveId ? `?project_id=${encodeURIComponent(effectiveId)}` : "";
+  return apiFetch(`/datastore/schemas${query}`);
 }
 
 /** GET /datastore/schemas/{table_name} — get schema for one table */
@@ -307,4 +482,27 @@ export async function apiSaveAttributeTranslation(
       body: JSON.stringify({ lang_code: langCode, label }),
     },
   );
+}
+
+/** GET /datastore/validation-rules — list every named validation rule stored in the DB */
+export async function apiListValidationRules(): Promise<BackendValidationRulesListResponse> {
+  return apiFetch("/datastore/validation-rules");
+}
+
+/** POST /datastore/validation-rules — create or update (upsert, keyed by tag) one named validation rule */
+export async function apiSaveValidationRule(
+  tag: string,
+  rule: Omit<BackendValidationRule, "tag">,
+): Promise<{ status: string; message?: string }> {
+  return apiFetch("/datastore/validation-rules", {
+    method: "POST",
+    body: JSON.stringify({ tag, ...rule }),
+  });
+}
+
+export async function apiDeleteValidationRule(tag: string): Promise<{ status: string; message?: string }> {
+  const res = await fetch(`${API_BASE}/datastore/validation-rules/${encodeURIComponent(tag)}`, {
+    method: "DELETE",
+  });
+  return res.json();
 }

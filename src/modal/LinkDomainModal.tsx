@@ -6,10 +6,10 @@ import CheckIcon from "@mui/icons-material/Check";
 import CloseIcon from "@mui/icons-material/Close";
 import StorageIcon from "@mui/icons-material/Storage";
 import DeleteOutlinedIcon from "@mui/icons-material/DeleteOutlined";
-import AddIcon from "@mui/icons-material/Add";
-import type { FieldType } from "../schema/types";
-
-interface QuickCreateField { name: string; type: FieldType }
+import type { NamedValidationRule } from "../core/schema/types";
+import { FieldBuilder } from "../core/renderer/domain model/FieldBuilder";
+import type { FieldDraft } from "../core/renderer/domain model/fieldDraftTypes";
+import { toPascalCase } from "../core/renderer/domain model/helpers";
 
 export interface LinkDomainResult {
   domainName:  string;
@@ -22,25 +22,40 @@ interface LinkDomainModalProps {
   onClose:          () => void;
   domainNames:      string[];
   onConfirm:        (result: LinkDomainResult) => void;
-  onCreateDomain:   (name: string, fields: QuickCreateField[]) => void;
+  /**
+   * Now receives the full per-field FieldDraft map (name → draft) instead
+   * of a flattened {name,type} list, so quick-created domains get real
+   * labels/validations/relations — the same shape CreateDomainTab already
+   * produces — instead of a stripped-down subset. `isPartOf` tells the
+   * caller whether to inject the parent FK field.
+   */
+  onCreateDomain:   (name: string, fieldDrafts: Record<string, FieldDraft>, isPartOf: boolean, parentDomainName?: string) => void;
   parentDomainName?: string;
+  /** Passed straight through to the embedded FieldBuilder so the quick-
+   *  create flow can attach registry validation refs / create new rules,
+   *  same as the full Create Domain tab. */
+  registry?: Record<string, NamedValidationRule>;
+  onAddValidationRule?: (tag: string, rule: NamedValidationRule) => void;
+  /** Escape hatch — hands off to the full Create Domain tab. Passed
+   *  through to FieldBuilder's compact-mode "open in full editor" link. */
+  onRedirectToCreate?: (domainName: string, parentDomain?: string, fieldName?: string) => void;
 }
 
 export function LinkDomainModal({
   open, onClose, domainNames, onConfirm, onCreateDomain, parentDomainName = "",
+  registry = {}, onAddValidationRule, onRedirectToCreate,
 }: LinkDomainModalProps) {
   const [view,        setView]        = useState<"list" | "create" | "fields" | "preview">("list");
   const [newName,     setNewName]     = useState("");
   const [selected,    setSelected]    = useState("");
   const [fkName,      setFkName]      = useState("");
 
-  // Quick field builder state
-  const [fields,      setFields]      = useState<QuickCreateField[]>([]);
-  const [fieldName,   setFieldName]   = useState("");
-  const [fieldType,   setFieldType]   = useState<FieldType>("string");
+  // Quick field builder state — now keyed by field name, holding full
+  // FieldDraft objects (same shape the Create Domain tab works with),
+  // instead of a flattened {name,type}[] list.
+  const [fieldDrafts, setFieldDrafts] = useState<Record<string, FieldDraft>>({});
   const [isPartOf,    setIsPartOf]    = useState(true);
-  const validNew = /^[a-z][a-zA-Z0-9_]*$/.test(newName);
-  const validFieldName = /^[a-z][a-zA-Z0-9_]*$/.test(fieldName);
+  const validNew = /^[a-zA-Z0-9][a-zA-Z0-9 _-]*$/.test(newName.trim());
 
   if (!open) return null;
 
@@ -56,38 +71,32 @@ export function LinkDomainModal({
 
   function handleCreate() {
     if (!validNew) return;
-    // Go to fields view — don't create yet
-    setSelected(newName.trim());
-    setFkName(deriveFK(newName.trim()));
+    // Go to fields view — don't create yet. Domain model names are
+    // stored PascalCase, however they were typed.
+    const name = toPascalCase(newName);
+    setSelected(name);
+    setFkName(deriveFK(name));
     setView("fields");
   }
 
-  function addField() {
-    if (!fieldName.trim() || !validFieldName) return;
-    setFields(prev => [...prev, { name: fieldName.trim(), type: fieldType }]);
-    setFieldName("");
-    setFieldType("string");
+  function handleAddFieldDraft(name: string, draft: FieldDraft) {
+    setFieldDrafts((prev) => ({ ...prev, [name]: draft }));
   }
 
-  function removeField(i: number) {
-    setFields(prev => prev.filter((_, j) => j !== i));
+  function removeField(name: string) {
+    setFieldDrafts((prev) => {
+      const next = { ...prev };
+      delete next[name];
+      return next;
+    });
   }
 
-function handleDoneFields() {
-    const autoFields: QuickCreateField[] = [...fields];
-    const parentIdFieldName = deriveFK(parentDomainName);
-    const alreadyHasParentFK = autoFields.some(f => f.name === parentIdFieldName);
-
-    // Only auto-add parent FK if "part of" is checked
-    if (isPartOf && parentDomainName && !alreadyHasParentFK) {
-      autoFields.unshift({ name: parentIdFieldName, type: "string" });
-    }
-
-    onCreateDomain(selected, autoFields);
+  function handleDoneFields() {
+    onCreateDomain(selected, fieldDrafts, isPartOf && !!parentDomainName, parentDomainName || undefined);
     setView("preview");
   }
 
-function handleConfirm() {
+  function handleConfirm() {
     if (!selected) return;
     console.log("MODAL CONFIRM isPartOf:", isPartOf, "selected:", selected);
     onConfirm({
@@ -98,19 +107,19 @@ function handleConfirm() {
     handleClose();
   }
 
-function handleClose() {
+  function handleClose() {
     setNewName(""); setSelected(""); setFkName("");
-    setView("list"); setFields([]);
-    setFieldName(""); setFieldType("string");
+    setView("list"); setFieldDrafts({});
     setIsPartOf(true);
     onClose();
   }
 
-  const FIELD_TYPES: FieldType[] = ["string", "number", "boolean", "date"];
-
   const TYPE_COLOR: Record<string, string> = {
     string: "purple", number: "blue", boolean: "teal", date: "orange",
+    relation: "indigo", list: "green",
   };
+
+  const fieldEntries = Object.entries(fieldDrafts);
 
   return ReactDOM.createPortal(
     <div className="ldm-overlay" onClick={handleClose}>
@@ -162,16 +171,17 @@ function handleClose() {
           <>
             <div className="ldm-body">
               <label className="si-form-label">
-                Domain name <span className="si-hint">camelCase</span>
+                Domain name <span className="si-hint">{newName.trim() ? `saved as ${toPascalCase(newName)}` : "PascalCase"}</span>
                 <input
                   className={`si-form-input ${newName && !validNew ? "si-form-input--error" : ""}`}
                   value={newName}
                   onChange={(e) => setNewName(e.target.value)}
-                  placeholder="e.g. branch"
+                  onBlur={() => { if (newName.trim()) setNewName(toPascalCase(newName)); }}
+                  placeholder="e.g. Branch"
                   autoFocus
                 />
                 {newName && !validNew && (
-                  <span className="si-inline-error">camelCase starting with a lowercase letter</span>
+                  <span className="si-inline-error">Name can only contain letters, numbers, spaces, - and _</span>
                 )}
               </label>
             </div>
@@ -241,21 +251,26 @@ function handleClose() {
               )}
 
               {/* Existing fields list */}
-              {fields.length > 0 && (
+              {fieldEntries.length > 0 && (
                 <div style={{ marginBottom: 12, display: "flex", flexDirection: "column", gap: 6 }}>
-                  {fields.map((f, i) => (
-                    <div key={i} style={{
+                  {fieldEntries.map(([name, d]) => (
+                    <div key={name} style={{
                       display: "flex", alignItems: "center", gap: 8,
                       padding: "6px 10px",
                       background: "var(--color-background-secondary)",
                       borderRadius: "var(--border-radius-md)",
                       border: "1px solid var(--color-border-secondary)",
                     }}>
-                      <span className={`si-badge si-badge--purple`}>{f.name}</span>
-                      <span className={`si-badge si-badge--${TYPE_COLOR[f.type] ?? "gray"}`}>{f.type}</span>
+                      <span className="si-badge si-badge--purple">{name}</span>
+                      <span className={`si-badge si-badge--${TYPE_COLOR[d.type as string] ?? "gray"}`}>{d.type}</span>
+                      {d.validationRefs?.length > 0 && (
+                        <span className="si-hint" style={{ fontSize: 11 }}>
+                          {d.validationRefs.length} rule(s)
+                        </span>
+                      )}
                       <button
                         type="button"
-                        onClick={() => removeField(i)}
+                        onClick={() => removeField(name)}
                         style={{
                           marginLeft: "auto", background: "none", border: "none",
                           cursor: "pointer", color: "var(--color-text-danger)",
@@ -269,42 +284,24 @@ function handleClose() {
                 </div>
               )}
 
-              {/* Add field row */}
-              <div style={{ display: "flex", gap: 8, alignItems: "flex-end" }}>
-                <label className="si-form-label" style={{ flex: 2, marginBottom: 0 }}>
-                  Field name
-                  <input
-                    className={`si-form-input ${fieldName && !validFieldName ? "si-form-input--error" : ""}`}
-                    value={fieldName}
-                    onChange={(e) => setFieldName(e.target.value)}
-                    onKeyDown={(e) => { if (e.key === "Enter") addField(); }}
-                    placeholder="e.g. branchName"
-                  />
-                </label>
-                <label className="si-form-label" style={{ flex: 1, marginBottom: 0 }}>
-                  Type
-                  <select
-                    className="si-form-select"
-                    value={fieldType}
-                    onChange={(e) => setFieldType(e.target.value as FieldType)}
-                  >
-                    {FIELD_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
-                  </select>
-                </label>
-                <button
-                  type="button"
-                  className="si-btn-add"
-                  onClick={addField}
-                  disabled={!fieldName.trim() || !validFieldName}
-                  style={{ marginBottom: 1 }}
-                >
-                  <AddIcon sx={{ fontSize: 14 }} />Add
-                </button>
-              </div>
-
-              {fieldName && !validFieldName && (
-                <span className="si-inline-error">camelCase starting with a lowercase letter</span>
-              )}
+              {/* Full field builder, in compact mode — same component the
+                  Create Domain tab uses, so name/type/labels/relations all
+                  behave identically. Validation-rule sections are hidden
+                  here (compact) to keep this a modal, not a second page;
+                  the "open in full editor" link inside it hands off to
+                  the real Create Domain tab if those are needed. */}
+              <FieldBuilder
+                submitLabel="Add field"
+                onSubmit={handleAddFieldDraft}
+                showAllLayers={false}
+                showLabelOnly
+                compact
+                registry={registry}
+                domainNames={domainNames}
+                parentDomainName={selected}
+                onAddValidationRule={onAddValidationRule}
+                onRedirectToCreate={onRedirectToCreate}
+              />
 
               {/* Skip hint */}
               <p style={{
@@ -318,9 +315,9 @@ function handleClose() {
             <div className="ldm-footer ldm-footer--gap">
               <button className="btn btn-primary" type="button" onClick={handleDoneFields}>
                 <CheckIcon sx={{ fontSize: 15 }} />
-                {fields.length > 0 ? `Create "${selected}" with ${fields.length} field(s)` : `Skip & Create "${selected}"`}
+                {fieldEntries.length > 0 ? `Create "${selected}" with ${fieldEntries.length} field(s)` : `Skip & Create "${selected}"`}
               </button>
-              <button className="btn btn-secondary" type="button" onClick={() => { setView("create"); setFields([]); }}>
+              <button className="btn btn-secondary" type="button" onClick={() => { setView("create"); setFieldDrafts({}); }}>
                 ← Back
               </button>
             </div>
@@ -363,15 +360,15 @@ function handleClose() {
               </div>
 
               {/* Show fields that will be created if new domain */}
-              {fields.length > 0 && (
+              {fieldEntries.length > 0 && (
                 <div style={{ marginBottom: 12 }}>
                   <div style={{ fontSize: 11, color: "var(--color-text-secondary)", marginBottom: 6 }}>
                     Fields being created in <strong>{selected}</strong>:
                   </div>
                   <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
                     <span className="si-badge si-badge--gray">id (auto)</span>
-                    {fields.map((f, i) => (
-                      <span key={i} className="si-badge si-badge--purple">{f.name}</span>
+                    {fieldEntries.map(([name]) => (
+                      <span key={name} className="si-badge si-badge--purple">{name}</span>
                     ))}
                     <span className="si-badge si-badge--gray">created_at (auto)</span>
                   </div>
@@ -393,7 +390,7 @@ function handleClose() {
               <button
                 className="btn btn-secondary"
                 type="button"
-                onClick={() => setView(fields.length > 0 || !domainNames.includes(selected) ? "fields" : "list")}
+                onClick={() => setView(fieldEntries.length > 0 || !domainNames.includes(selected) ? "fields" : "list")}
               >
                 ← Back
               </button>

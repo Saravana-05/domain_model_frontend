@@ -1,4 +1,4 @@
-export type FieldType = "string" | "number" | "boolean" | "date" | "list" | "image";
+export type FieldType = "string" | "number" | "decimal" | "boolean" | "date" | "list" | "image" | "relation";
 export type ComponentType = "text" | "number" | "select" | "checkbox" | "textarea" | "date";
 export type FieldFormat   = "email" | "phone" | "url" | "currency" | "percentage";
 export type HttpMethod    = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
@@ -16,6 +16,69 @@ export interface ValidationRule {
   value?: any;
   message: string;
   when?: string; // conditional — only run when expression is true
+}
+
+// ── Named validation registry entries (richer, composite-capable) ────────────
+//
+// The registry can now author rules in this richer shape — composite ("all",
+// grouping several sub-rules under one name), combined-range kinds ("length"
+// for min+max string length together, "range" for min+max numeric value
+// together instead of two separate tags), and "cardinality" (how many
+// related child records exist — a relation-count check, not a scalar field
+// check at all).
+//
+// This is deliberately a SEPARATE, additive type from ValidationRule above,
+// not a replacement — every existing registry entry (and the runtime
+// validator in formplugin.tsx's validateField, which only ever understands
+// the flat {type, value, message} shape) keeps working completely
+// unchanged. buildSchemas() flattens any NamedValidationRule using the new
+// `kind`-based shape back down into one or more plain ValidationRule
+// objects before they reach a field's resolved validations[] — see
+// flattenNamedValidationRule in domainBuilder.ts. The one exception is
+// "cardinality": it can't be flattened into a scalar-field check (there's
+// no such thing as "the string value of this field has at least 2 related
+// rows"), so it's preserved as-is for documentation/export purposes, but
+// nothing currently *enforces* it at runtime — that would need a genuinely
+// new relation-count validation engine, which doesn't exist yet.
+export type ValidationKind =
+  | "required" | "pattern" | "length" | "range" | "cardinality" | "custom" | "all";
+
+export interface NamedValidationRule {
+  /** Human documentation only — not used by any resolution logic. */
+  version?:     string;
+  description?: string;
+  /**
+   * Which domain "owns" this rule, for grouping in the picker: "common"
+   * for anything reusable across any domain (required, email-format,
+   * etc.), or a specific domain name ("doctor", "clinic", "branch"...)
+   * for rules that only make sense for that one domain's fields. Defaults
+   * to "common" when omitted, so every pre-existing entry that predates
+   * this field doesn't need to be touched to keep working the same way.
+   */
+  category?: string;
+
+  /**
+   * Which shape this entry uses. Omit entirely to use the legacy flat
+   * shape below (type/value/message) instead — both are valid on the same
+   * registry, so existing entries never need to be rewritten.
+   */
+  kind?: ValidationKind;
+
+  // "pattern" | "custom" — the regex (pattern) or expression (custom)
+  expression?: string;
+  // "length" | "range" | "cardinality" — either bound can be omitted
+  min?: number;
+  max?: number;
+  // "all" — nested sub-rules, each following this same shape (typically
+  // without their own version/description — those belong on the parent)
+  validations?: NamedValidationRule[];
+
+  // ── Legacy flat shape — identical to ValidationRule, kept inline here
+  // so an existing registry entry written the old way is still a fully
+  // valid NamedValidationRule with no changes needed. ──────────────────────
+  type?:    "required" | "min" | "max" | "minLength" | "maxLength" | "pattern" | "custom";
+  value?:   any;
+  message?: string;
 }
 
 // ── Access rule (resolved — used internally by engines) ───────────────────────
@@ -63,7 +126,7 @@ export interface ActionDef {
 // A registry entry is a normal ValidationRule stored under a unique string tag.
 // Tags are referenced in DomainFieldCore.validationRefs.
 export interface ValidationRegistry {
-  rules: Record<string, ValidationRule>; // tag → rule
+  rules: Record<string, NamedValidationRule>; // tag → rule
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -82,6 +145,23 @@ export interface DomainFieldCore {
    * Acts like a foreign-key pointer to another domain model.
    */
   relatedDomain?:   string;
+  /**
+   * Only meaningful for FK relation fields pointing at an EXISTING domain
+   * (the "belongs-to" case, e.g. branch.clinicId → clinic). Tags whether
+   * the relationship is structural ("integral" — the record only ever
+   * exists under its related domain, no Add Existing/Remove downstream)
+   * or a normal reassignable reference ("association" — Add Existing/
+   * Remove shown downstream). Persisted through to the backend schema
+   * field so the view-builder can read it.
+   */
+  relationKind?:    "integral" | "association";
+  /**
+   * For "relation" fields — whether this field points to a single related
+   * record ("one") or a collection of them ("many"/"list"). Used by
+   * exportJson.ts and draftConverters.ts to decide how to serialize the
+   * relation (single FK vs. to-many).
+   */
+  cardinality?:     "one" | "many" | "list";
   /**
    * When type === "list", the name of the domain whose IDs this field stores.
    * Stores string[] of record IDs at runtime. Auto-created as
@@ -221,6 +301,12 @@ export interface DomainFieldDef {
   format?:        FieldFormat;
   relatedDomain?: string;
   listDomain?:    string;
+  /**
+   * For "relation" fields — mirrors DomainFieldCore.cardinality. Added so
+   * exportJson.ts can read fieldDef.cardinality off the compiled output,
+   * not just the raw draft/core shape.
+   */
+  cardinality?:   "one" | "many" | "list";
 }
 
 export interface DomainDef {
@@ -248,7 +334,7 @@ export interface AllSchemas {
     rbac?:               RBACConfig;
     abac?:               ABACConfig;
     ui?:                 Record<string, FieldUIConfig>;
-    validationRegistry?: Record<string, ValidationRule>; // the raw registry
+    validationRegistry?: Record<string, NamedValidationRule>; // the raw registry
     validationRefs?:     Record<string, string[]>;       // field path → tags used
   };
 }
