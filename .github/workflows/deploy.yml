@@ -3,7 +3,7 @@ name: Build and Deploy Domain Model Frontend
 on:
   push:
     branches:
-      - main
+      - keerthana-dev
 
 jobs:
   build-and-push:
