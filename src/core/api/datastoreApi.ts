@@ -346,6 +346,56 @@ export function backendSchemaToFrontend(entry: BackendSchemaEntry): {
   return { domainName: table_name, fields, uiHints, rbacRules, abacRules, versioned: !!versioned };
 }
 
+// ════════════════════════════════════════════════════════════════════════════
+// Drafts — a domain model saved in the DB but not yet turned into tables
+// ════════════════════════════════════════════════════════════════════════════
+
+/** What the draft will create when it's submitted — one entry per table,
+ *  in dependency order (related domains first, then the main domain, then
+ *  junction tables). These are the exact same request bodies that would
+ *  otherwise have gone straight to POST /datastore/create. */
+export interface DraftTableSpec extends BackendCreateRequest {}
+
+export interface SaveDraftRequest {
+  domain_name: string;
+  project_id?: string | number | null;
+  tables:      DraftTableSpec[];
+  /** Opaque builder state, round-tripped so an unfinished domain reopens
+   *  exactly as it was left (the FieldDraft map + the CreateDomainPayload
+   *  the UI replays locally once the draft is submitted). */
+  fields?:     Record<string, any>;
+  payload?:    Record<string, any>;
+  db_backend?: "dynamodb" | "postgresql";
+  versioned?:  boolean;
+}
+
+export interface BackendDraft {
+  id:            string;
+  domain_name:   string;
+  project_id:    string | null;
+  status:        "draft" | "submitted";
+  payload:       SaveDraftRequest & Record<string, any>;
+  created_by:    string | null;
+  created_at:    string | null;
+  updated_at:    string | null;
+  submitted_at:  string | null;
+}
+
+export interface BackendDraftListResponse {
+  status: string;
+  count:  number;
+  drafts: BackendDraft[];
+}
+
+export interface BackendSubmitDraftResponse {
+  status:       string;
+  draft_id:     string;
+  domain_name?: string;
+  submitted_at?: string;
+  results?:     { table_name: string; created?: boolean; status: string; message?: string }[];
+  message?:     string;
+}
+
 export interface BackendValidationRule {
   tag:          string;
   version?:     string;
@@ -406,6 +456,67 @@ export async function apiCreateDomain(req: BackendCreateRequest): Promise<Backen
     method: "POST",
     body:   JSON.stringify({ ...req, project_id: project_id ?? undefined }),
   });
+}
+
+/**
+ * POST /datastore/drafts — save a domain model as a draft.
+ *
+ * The draft is persisted in the database, but no tables are created:
+ * the backend writes one row to domain_model_drafts and issues no DDL.
+ * The tables are generated only by apiSubmitDraft() below. Upserts on
+ * (domain_name, project_id), so saving the same domain repeatedly
+ * updates its one draft instead of accumulating copies.
+ *
+ * Project scoping follows the same rule as apiCreateDomain: omit
+ * project_id to use the currently-selected project, pass `null` to
+ * force "no project".
+ */
+export async function apiSaveDraft(
+  req: SaveDraftRequest,
+): Promise<{ status: string; draft_id: string; action?: string; message?: string }> {
+  const project_id = req.project_id !== undefined
+    ? req.project_id
+    : useProjectStore.getState().currentProjectId;
+
+  return apiFetch("/datastore/drafts", {
+    method: "POST",
+    body:   JSON.stringify({ ...req, project_id: project_id ?? undefined }),
+  });
+}
+
+/** GET /datastore/drafts — list drafts. `status: "all"` includes already-submitted ones. */
+export async function apiListDrafts(
+  projectId?: string | null,
+  status: "draft" | "submitted" | "all" = "draft",
+): Promise<BackendDraftListResponse> {
+  const effectiveId = projectId !== undefined
+    ? projectId
+    : useProjectStore.getState().currentProjectId;
+
+  const params = new URLSearchParams({ status });
+  if (effectiveId) params.set("project_id", String(effectiveId));
+  return apiFetch(`/datastore/drafts?${params.toString()}`);
+}
+
+/** GET /datastore/drafts/{id} — fetch one draft (to reopen it in the builder) */
+export async function apiGetDraft(draftId: string): Promise<{ status: string; draft: BackendDraft }> {
+  return apiFetch(`/datastore/drafts/${encodeURIComponent(draftId)}`);
+}
+
+/** DELETE /datastore/drafts/{id} — discard a draft */
+export async function apiDeleteDraft(draftId: string): Promise<{ status: string; draft_id?: string }> {
+  return apiFetch(`/datastore/drafts/${encodeURIComponent(draftId)}`, { method: "DELETE" });
+}
+
+/**
+ * POST /datastore/drafts/{id}/submit — generate the domain model tables.
+ *
+ * This is the only call that turns a draft into real tables. If any
+ * table fails the backend leaves the draft open (status stays "draft")
+ * and reports which ones failed, so it can be fixed and resubmitted.
+ */
+export async function apiSubmitDraft(draftId: string): Promise<BackendSubmitDraftResponse> {
+  return apiFetch(`/datastore/drafts/${encodeURIComponent(draftId)}/submit`, { method: "POST" });
 }
 
 /**

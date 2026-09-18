@@ -251,6 +251,9 @@ export function DomainModelTab({
   onNewDomainFromRelation={onQuickCreateDomain}
   onAddValidationRule={onAddValidationRule}
   onRedirectToCreate={onRedirectToCreate}
+  onCreateRelatedDomain={(fName, draft) => {
+    if (draft.relatedDomain) onRedirectToCreate(draft.relatedDomain, domainName, fName);
+  }}
   onSubmit={(newName, draft) => {
     onEditField(domainName, fieldName, newName, draft);
     setEditing(null);
@@ -321,6 +324,9 @@ export function DomainModelTab({
   onNewDomainFromRelation={onQuickCreateDomain}
   onAddValidationRule={onAddValidationRule}
   onRedirectToCreate={onRedirectToCreate}
+  onCreateRelatedDomain={(fieldName, draft) => {
+    if (draft.relatedDomain) onRedirectToCreate(draft.relatedDomain, childName, fieldName);
+  }}
   onSubmit={(fieldName, draft) => onAddField(childName, fieldName, draft)}
 />
                             </AddSection>
@@ -359,6 +365,9 @@ export function DomainModelTab({
   onNewDomainFromRelation={onQuickCreateDomain}
   onAddValidationRule={onAddValidationRule}
   onRedirectToCreate={onRedirectToCreate}
+  onCreateRelatedDomain={(fieldName, draft) => {
+    if (draft.relatedDomain) onRedirectToCreate(draft.relatedDomain, domainName, fieldName);
+  }}
   onSubmit={(fieldName, draft) => onAddField(domainName, fieldName, draft)}
 />
                 </AddSection>

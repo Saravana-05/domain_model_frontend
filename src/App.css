@@ -428,6 +428,18 @@ body {
 }
 .si-form-label--full { flex: 1 1 100%; min-width: 100%; }
 
+/* Reserves the same caption height across every column in a .si-form-row,
+   so a label whose hint wraps to a second line (e.g. "saved as …") doesn't
+   push its input lower than sibling inputs whose captions stay on one line. */
+.si-form-label-text {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  column-gap: 6px;
+  row-gap: 2px;
+  min-height: 28px;
+}
+
 .si-form-sublabel { font-size: 12px; font-weight: 600; color: var(--text-primary); white-space: nowrap; }
 
 .si-form-input, .si-form-select {

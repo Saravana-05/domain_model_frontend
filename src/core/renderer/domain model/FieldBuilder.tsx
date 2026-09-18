@@ -185,7 +185,7 @@ const [fieldName, setFieldName] = useState(initialName);
         <div className="si-layer-section-label">Layer 1 — Domain Model</div>
         <div className="si-form-row">
           <label className="si-form-label">
-            Field name (EN) * {fieldName.trim() && <span className="si-hint">saved as {toCamelCase(fieldName)}</span>}
+            <span className="si-form-label-text">Field name (EN) * {fieldName.trim() && <span className="si-hint">saved as {toCamelCase(fieldName)}</span>}</span>
             <input
               className="si-form-input"
               value={fieldName}
@@ -204,7 +204,7 @@ const [fieldName, setFieldName] = useState(initialName);
           </label>
         
            <label className="si-form-label">
-            Type
+            <span className="si-form-label-text">Type</span>
            <select
               className="si-form-select"
               value={draft.type}
@@ -228,7 +228,7 @@ const [fieldName, setFieldName] = useState(initialName);
             </select>
           </label>
           <label className="si-form-label">
-              Cardinality
+              <span className="si-form-label-text">Cardinality</span>
               <label style={{ display: "flex", alignItems: "center", gap: 8, height: 36, padding: "0 10px", border: "1px solid var(--color-border-secondary)", borderRadius: "var(--border-radius-md)", cursor: "pointer", background: "var(--color-background-primary)" }}>
                 <input
                   type="checkbox"
@@ -242,7 +242,7 @@ const [fieldName, setFieldName] = useState(initialName);
 
           {draft.type === "relation" && (
             <label className="si-form-label">
-              Select Domain
+              <span className="si-form-label-text">Select Domain</span>
               <select
                 className="si-form-select"
                 value={
@@ -331,7 +331,7 @@ const [fieldName, setFieldName] = useState(initialName);
                 <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
                   <div style={{ display:"flex", alignItems:"flex-end", gap:6 }}>
                     <label className="si-form-label" style={{ marginBottom: 0 }}>
-                      New domain name {trimmed && <span className="si-hint">saved as {toPascalCase(trimmed)}</span>}
+                      <span className="si-form-label-text">New domain name {trimmed && <span className="si-hint">saved as {toPascalCase(trimmed)}</span>}</span>
                       <input
                         className={`si-form-input ${trimmed && !canCreate ? "si-form-input--error" : ""}`}
                         value={draft.relatedDomain}

@@ -106,6 +106,13 @@ export const SchemaInspector = forwardRef<SchemaInspectorHandle, SchemaInspector
   const [pendingDomainName, setPendingDomainName] = useState<string | null>(null);
   const [pendingParentDomain, setPendingParentDomain] = useState<string | null>(null);
   const [pendingRelationFieldName, setPendingRelationFieldName] = useState<string | null>(null);
+  // Which tab the user was actually on (e.g. "domain") right before a
+  // "Create {X} domain" redirect jumped them into the Create Domain tab
+  // to build the missing related domain. Once that related domain is
+  // created (handleDomainCreated), we jump straight back here instead of
+  // stranding the user on the Create Domain tab — that "control never
+  // comes back" gap was the reported bug.
+  const [returnTab, setReturnTab] = useState<MainTab | null>(null);
   const [pendingFK, setPendingFK] = useState<{
   parentDomain: string;
   childDomain: string;
@@ -422,6 +429,12 @@ async function handleQuickCreateDomain(name: string, fields: QuickCreateField[])
 
   // ── Redirect to Create Domain tab ─────────────────────────────────────────
 const handleRedirectToCreate = (domainName: string, parentDomain?: string, fieldName?: string) => {
+  // Remember where we're jumping FROM so handleDomainCreated can send the
+  // user straight back once the related domain is created. Only capture
+  // it the first time (don't overwrite with "create" if a second redirect
+  // happens while one is already pending) so nested "create X, which
+  // needs Y, which needs Z" chains still land back on the original tab.
+  setReturnTab((prev) => prev ?? (tab !== "create" ? tab : prev));
   setPendingDomainName(domainName);
   setPendingParentDomain(parentDomain || null);
   setPendingRelationFieldName(fieldName || null);
@@ -909,10 +922,31 @@ function handleDomainCreated(payload: CreateDomainPayload) {
           },
         },
       }));
+      // 🔧 This relation field lives only on pendingParentDomain (e.g.
+      // sampledomain.example → Example) — it's display-only, never a real
+      // backend column, so nothing above actually persists it anywhere.
+      // Without also saving it as a relation marker (same mechanism every
+      // other relation-only field in this file relies on — see
+      // saveRelationMarker above), the field only exists in the in-memory
+      // `extra` state: it shows up immediately, but a refresh calls
+      // handleLoadFromBackend, which rebuilds domains from the backend's
+      // real schema and has no idea this field ever existed. The result
+      // was exactly the reported bug — "Example" (a real table) survives
+      // the refresh, but "example" on sampledomain silently disappears.
+      saveRelationMarker(pendingParentDomain, pendingRelationFieldName, relationField);
       // Clear pending state
       setPendingDomainName(null);
       setPendingParentDomain(null);
       setPendingRelationFieldName(null);
+
+      // The related domain that was missing is now created and linked
+      // back onto pendingParentDomain above — jump back to whichever tab
+      // the user was actually working in (e.g. "Domain Model") instead of
+      // leaving them stranded on the Create Domain tab.
+      if (returnTab) {
+        setTab(returnTab);
+        setReturnTab(null);
+      }
     }
     
     // 🔥 NEW: Add pending FK to the new domain if it exists
@@ -1310,21 +1344,31 @@ function handleViewConfig(domainName: string, cfg: DomainViewConfig) {
           extraABACKeys={new Set(Object.keys(extra.abacRules))}
         />
       )}
-     {tab === "create" && (
-  <CreateDomainTab
-    onAdd={handleDomainCreated}
-    registry={liveSchemas._layers?.validationRegistry ?? {}}
-    domainNames={liveDomainNames}
-    onQuickCreateDomain={handleQuickCreateDomain}
-    onRichCreateDomain={handleRichCreateDomain}
-    schemas={liveSchemas}
-    initialDomainName={pendingDomainName || undefined}
-    onRedirectToCreate={handleRedirectToCreate}
-    pendingFK={pendingFK}
-    onAddValidationRule={handleAddValidationRule}
-    onGoToValidations={() => setTab("validations")}
-  />
-)}
+      {/* Kept permanently mounted (instead of `{tab === "create" && ...}`)
+          and just hidden with CSS when another tab is active. CreateDomainTab
+          holds its in-progress "paused domain" stack (drafts/draftOrder) as
+          local state — e.g. when you're building "Grade", add a relation to
+          a not-yet-existing "Designation", and get switched over to build
+          Designation first. Unmounting on every tab switch wiped that whole
+          stack out, so navigating away (even briefly, even automatically)
+          lost the paused "Grade" draft with no way to get it back. Staying
+          mounted means that in-progress work survives regardless of which
+          tab is showing. */}
+      <div style={{ display: tab === "create" ? "block" : "none" }}>
+        <CreateDomainTab
+          onAdd={handleDomainCreated}
+          registry={liveSchemas._layers?.validationRegistry ?? {}}
+          domainNames={liveDomainNames}
+          onQuickCreateDomain={handleQuickCreateDomain}
+          onRichCreateDomain={handleRichCreateDomain}
+          schemas={liveSchemas}
+          initialDomainName={pendingDomainName || undefined}
+          onRedirectToCreate={handleRedirectToCreate}
+          pendingFK={pendingFK}
+          onAddValidationRule={handleAddValidationRule}
+          onGoToValidations={() => setTab("validations")}
+        />
+      </div>
       {tab === "data" && <DataTab schemas={liveSchemas} dbBackends={extra.dbBackends} />}
       {tab === "translations" && <TranslationsTab schemas={liveSchemas} onSave={handleSaveTranslation} />}
       {tab === "export" && <ExportJsonTab schemas={liveSchemas} />}

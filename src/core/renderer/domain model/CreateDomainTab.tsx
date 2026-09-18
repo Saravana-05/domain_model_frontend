@@ -10,11 +10,17 @@ import ExpandLessIcon          from "@mui/icons-material/ExpandLess";
 import LabelIcon               from "@mui/icons-material/Label";
 import LinkOutlinedIcon        from "@mui/icons-material/LinkOutlined";
 import DeleteOutlinedIcon      from "@mui/icons-material/DeleteOutlined";
+import SaveOutlinedIcon        from "@mui/icons-material/SaveOutlined";
+import EditOutlinedIcon        from "@mui/icons-material/EditOutlined";
 import type {
   AllSchemas, DomainDefinition, DomainFieldCore, FieldUIConfig,
   RBACFieldRule, ABACFieldRule, NamedValidationRule, FieldType,
 } from "../../schema/types";
-import { domainToBackendRequest, apiCreateDomain, type BackendCreateResponse } from "../../api/datastoreApi";
+import {
+  domainToBackendRequest, apiCreateDomain,
+  apiSaveDraft, apiListDrafts, apiSubmitDraft, apiDeleteDraft,
+  type BackendCreateResponse, type BackendCreateRequest, type BackendDraft,
+} from "../../api/datastoreApi";
 import { useProjectStore } from "../../store/projectStore";
 import { dbLocation, Badge, CopyBlock, primaryLabel, toPascalCase, toCamelCase } from "./helpers";
 import { genDomainFile } from "./codeGenerators";
@@ -111,6 +117,15 @@ export function CreateDomainTab({ onAdd, registry = {}, domainNames = [], onQuic
   // something it depends on.
   const [drafts,     setDrafts]     = useState<Record<string, DomainDraft>>({});
   const [draftOrder, setDraftOrder] = useState<string[]>([]);
+
+  // ── Persisted drafts — saved in the database, no tables generated ──
+  // Unlike the in-memory stack above, these survive a reload. A draft
+  // holds the complete domain model definition but deliberately creates
+  // nothing: submitting it (submitDraft below) is what generates the
+  // domain model tables. `activeDraftId` is the draft currently open in
+  // this form, if any, so re-saving updates it instead of forking a copy.
+  const [savedDrafts,   setSavedDrafts]   = useState<BackendDraft[]>([]);
+  const [activeDraftId, setActiveDraftId] = useState<string | null>(null);
 
   type Status = { state: "idle" | "loading" | "ok" | "err"; msg: string };
   const [status, setStatus] = useState<Status>({ state: "idle", msg: "" });
@@ -374,12 +389,25 @@ export function CreateDomainTab({ onAdd, registry = {}, domainNames = [], onQuic
     return { domain: { name, fields: domainFields }, uiHints, rbacRules, abacRules, dbBackend: dbBackendArg, versioned: versionedArg, junctionDomains, relatedDomains, fieldLabels };
   }
 
-  /** The actual backend calls for one domain's payload — main table, any
-   *  auto-created/merged related domains, any junction tables. Extracted
-   *  so both the single "Create Domain" button and "Create All" can
-   *  share it. */
-  async function createDomainFromPayload(payload: CreateDomainPayload): Promise<string[]> {
-    const messages: string[] = [];
+  /**
+   * Every backend create-request one domain's payload implies — main
+   * table, any auto-created/merged related domains, any junction tables
+   * — built but NOT sent.
+   *
+   * Split out from createDomainFromPayload below so the exact same
+   * requests can either be executed immediately ("Create Domain") or
+   * stored untouched on a draft ("Save as Draft") and replayed later by
+   * the backend on submit. Both paths therefore produce byte-identical
+   * tables; a draft isn't a second, parallel way of describing a domain
+   * model, it's the same description held back until submit.
+   *
+   * Each entry carries a `label` used only for the status messages —
+   * the rest is the wire request itself.
+   */
+  function buildBackendRequests(
+    payload: CreateDomainPayload,
+  ): Array<{ label: string; req: BackendCreateRequest }> {
+    const out: Array<{ label: string; req: BackendCreateRequest }> = [];
 
     // Only fields that are genuinely real columns on THIS domain go to
     // the backend — display-only markers (isMarkerOnly, from the
@@ -405,19 +433,7 @@ export function CreateDomainTab({ onAdd, registry = {}, domainNames = [], onQuic
       registry,
     } as any);
     req.project_id = selectedProjectId;
-
-    try {
-      const res = await apiCreateDomain(req);
-      if (res.status === "success") {
-        const action  = res.table_created ? "created" : "already existed";
-        const loc     = dbLocation(res);
-        messages.push(`✅ "${res.table_name}" ${action} in ${loc}`);
-      } else {
-        messages.push(`❌ Main table error: ${res.message}`);
-      }
-    } catch (err: any) {
-      messages.push(`⚠️ Main table backend unreachable: ${err?.message ?? String(err)}`);
-    }
+    out.push({ label: "Main table", req });
 
     for (const rd of payload.relatedDomains ?? []) {
       const rdReq = domainToBackendRequest({
@@ -430,17 +446,10 @@ export function CreateDomainTab({ onAdd, registry = {}, domainNames = [], onQuic
         registry,
       });
       rdReq.project_id = selectedProjectId;
-      try {
-        const rdRes = await apiCreateDomain(rdReq);
-        if (rdRes.status === "success") {
-          const action = rdRes.table_created ? "created" : "already existed";
-          messages.push(`✅ Related domain "${rd.name}" ${action} (${Object.keys(rd.fields).length} field(s))`);
-        } else {
-          messages.push(`❌ Related domain "${rd.name}" error: ${rdRes.message}`);
-        }
-      } catch (err: any) {
-        messages.push(`⚠️ Related domain "${rd.name}" unreachable: ${err?.message ?? String(err)}`);
-      }
+      out.push({
+        label: `Related domain "${rd.name}" (${Object.keys(rd.fields).length} field(s))`,
+        req:   rdReq,
+      });
     }
 
     for (const jd of payload.junctionDomains ?? []) {
@@ -454,16 +463,34 @@ export function CreateDomainTab({ onAdd, registry = {}, domainNames = [], onQuic
         registry,
       });
       jReq.project_id = selectedProjectId;
+      out.push({ label: `Junction table "${jd.name}"`, req: jReq });
+    }
+
+    return out;
+  }
+
+  /** The actual backend calls for one domain's payload — main table, any
+   *  auto-created/merged related domains, any junction tables. Extracted
+   *  so both the single "Create Domain" button and "Create All" can
+   *  share it. */
+  async function createDomainFromPayload(payload: CreateDomainPayload): Promise<string[]> {
+    const messages: string[] = [];
+
+    for (const { label, req } of buildBackendRequests(payload)) {
       try {
-        const jRes = await apiCreateDomain(jReq);
-        if (jRes.status === "success") {
-          const action = jRes.table_created ? "created" : "already existed";
-          messages.push(`✅ Junction table "${jd.name}" ${action}`);
+        const res = await apiCreateDomain(req);
+        if (res.status === "success") {
+          const action = res.table_created ? "created" : "already existed";
+          messages.push(
+            label === "Main table"
+              ? `✅ "${res.table_name}" ${action} in ${dbLocation(res)}`
+              : `✅ ${label} ${action}`,
+          );
         } else {
-          messages.push(`❌ Junction "${jd.name}" error: ${jRes.message}`);
+          messages.push(`❌ ${label} error: ${res.message}`);
         }
       } catch (err: any) {
-        messages.push(`⚠️ Junction "${jd.name}" backend unreachable: ${err?.message ?? String(err)}`);
+        messages.push(`⚠️ ${label} backend unreachable: ${err?.message ?? String(err)}`);
       }
     }
 
@@ -485,6 +512,16 @@ export function CreateDomainTab({ onAdd, registry = {}, domainNames = [], onQuic
     });
 
     if (!hasErr) {
+      // This domain was open from a saved draft and has now genuinely
+      // been created — the draft has served its purpose, so clear it
+      // rather than leaving a stale "not yet created" entry pointing at
+      // tables that now exist.
+      if (activeDraftId) {
+        const open = savedDrafts.find((d) => d.id === activeDraftId);
+        if (open) await discardDraft(open);
+        setActiveDraftId(null);
+      }
+
       if (draftOrder.length > 0) {
         const parentName  = draftOrder[draftOrder.length - 1];
         const parentDraft = drafts[parentName];
@@ -571,6 +608,120 @@ export function CreateDomainTab({ onAdd, registry = {}, domainNames = [], onQuic
   }
 
 
+  // ── Saved drafts (persisted) ────────────────────────────────────────
+  // Distinct from the in-memory `drafts` stack above: those are domains
+  // paused mid-build for this session only. These live in the database
+  // (domain_model_drafts) and survive reloads, but — crucially — saving
+  // one creates NO tables. The domain model becomes real tables only
+  // when the draft is submitted, which is the one call that runs the
+  // stored create-requests.
+
+  async function refreshSavedDrafts() {
+    try {
+      const res = await apiListDrafts(selectedProjectId, "draft");
+      setSavedDrafts(res.drafts ?? []);
+    } catch {
+      // A drafts-list failure must never block building a domain —
+      // leave the list as-is and stay silent.
+    }
+  }
+
+  useEffect(() => {
+    refreshSavedDrafts();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedProjectId]);
+
+  /** Save what's currently in the form as a draft. Persists the field
+   *  map (so it reopens exactly as left), the full CreateDomainPayload
+   *  (replayed locally after submit so UI hints / RBAC / ABAC / labels
+   *  land as they would have), and the create-requests themselves. */
+  async function saveDraft() {
+    if (!validName || !hasFields) return;
+    setStatus({ state: "loading", msg: "Saving draft..." });
+
+    const payload = buildPayload();
+    const tables  = buildBackendRequests(payload).map(({ req }) => req);
+
+    try {
+      const res = await apiSaveDraft({
+        domain_name: payload.domain.name,
+        project_id:  selectedProjectId,
+        tables,
+        fields,
+        payload:     payload as any,
+        db_backend:  dbBackend,
+        versioned,
+      });
+      setActiveDraftId(res.draft_id ?? null);
+      await refreshSavedDrafts();
+      setStatus({
+        state: "ok",
+        msg: `💾 Draft "${payload.domain.name}" saved — ${tables.length} table(s) will be created when you submit it. Nothing has been created yet.`,
+      });
+    } catch (err: any) {
+      setStatus({ state: "err", msg: `❌ Could not save draft: ${err?.message ?? String(err)}` });
+    }
+  }
+
+  /** Reopen a saved draft in the form. Purely local — touches nothing
+   *  in the backend, so an accidental click can't create anything. */
+  function openDraft(draft: BackendDraft) {
+    const p = draft.payload ?? ({} as any);
+    setDomainName(draft.domain_name);
+    setFields((p.fields ?? {}) as Record<string, FieldDraft>);
+    setDbBackend((p.db_backend as "postgresql" | "dynamodb") ?? "postgresql");
+    setVersioned(!!p.versioned);
+    setExpandedFields({});
+    setSelectedProjectId(draft.project_id ?? null);
+    setActiveDraftId(draft.id);
+    setGenerated(false);
+    setStatus({ state: "idle", msg: `Editing draft "${draft.domain_name}" — not yet submitted.` });
+  }
+
+  /** Submit a draft — the only path that turns it into real tables.
+   *  The backend creates them from the stored requests; onAdd then
+   *  replays the stored payload into the local layers so the rest of
+   *  the app sees the new domain exactly as it would have after a
+   *  direct "Create Domain". */
+  async function submitDraft(draft: BackendDraft) {
+    setStatus({ state: "loading", msg: `Submitting "${draft.domain_name}" — creating tables...` });
+    try {
+      const res = await apiSubmitDraft(draft.id);
+      const results = res.results ?? [];
+      const made = results.map((r) =>
+        r.status === "success"
+          ? `✅ "${r.table_name}" ${r.created ? "created" : "already existed"}`
+          : `❌ "${r.table_name}": ${r.message}`
+      );
+
+      const storedPayload = (draft.payload as any)?.payload as CreateDomainPayload | undefined;
+      if (storedPayload) onAdd(storedPayload);
+
+      await refreshSavedDrafts();
+      if (activeDraftId === draft.id) {
+        setActiveDraftId(null);
+        setDomainName("");
+        setFields({});
+        setVersioned(false);
+        setExpandedFields({});
+        setGenerated(false);
+      }
+      setStatus({ state: "ok", msg: made.join(" · ") });
+    } catch (err: any) {
+      setStatus({ state: "err", msg: `❌ Submit failed: ${err?.message ?? String(err)}` });
+    }
+  }
+
+  async function discardDraft(draft: BackendDraft) {
+    try {
+      await apiDeleteDraft(draft.id);
+      if (activeDraftId === draft.id) setActiveDraftId(null);
+      await refreshSavedDrafts();
+    } catch (err: any) {
+      setStatus({ state: "err", msg: `❌ Could not discard draft: ${err?.message ?? String(err)}` });
+    }
+  }
+
   const codeGenFields: Record<string, DomainFieldCore> = {};
   for (const [n, d] of Object.entries(fields)) { codeGenFields[n] = draftToDomainFieldCore(d); }
 
@@ -582,48 +733,127 @@ export function CreateDomainTab({ onAdd, registry = {}, domainNames = [], onQuic
         <span className="si-field-count">Defines the Domain Model (Layer 1) and creates a table in the configured database</span>
       </div>
 
-      {/* Paused domains — click to jump back and keep adding to it.
-          Nothing here is created in the backend until its own
-          "Create Domain" is clicked; this is purely local, in-progress
-          state being parked. */}
-      {draftOrder.length > 0 && (
-        <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", padding: "8px 0 4px" }}>
-          <span style={{ fontSize: 12, color: "var(--color-text-secondary)" }}>Paused — building <strong>{domainName}</strong> for:</span>
-          {draftOrder.map((name) => (
-            <button
-              key={name}
-              type="button"
-              className="btn btn-secondary"
-              onClick={() => handleResumeDraft(name)}
-              style={{ fontSize: 12, display: "inline-flex", alignItems: "center", gap: 4 }}
-              title={`Resume building "${name}"`}
-            >
-              <AddCircleOutlinedIcon sx={{ fontSize: 14 }} />
-              {name}
-            </button>
-          ))}
-        </div>
-      )}
-
-      <div className="si-form-sublabel" style={{ marginBottom: 8 }}>Project</div>
-      <div className="si-form-row" style={{ marginBottom: 12 }}>
-        <label className="si-form-label" style={{ maxWidth: 280 }}>
-          Which project is this domain under?
-          <select
-            className="si-form-input"
-            value={selectedProjectId ?? ""}
-            onChange={(e) => setSelectedProjectId(e.target.value || null)}
-          >
-            <option value="">— No project (global) —</option>
-            {projects.map((p) => (
-              <option key={p.id} value={p.id}>{p.name}</option>
-            ))}
-          </select>
-        </label>
-        {projectsLoading && <span className="si-hint">Loading projects…</span>}
-      </div>
-
       <div className="si-add-form">
+        {/* Saved drafts — persisted in the database, but not yet real.
+            None of these has a table behind it: the schema is stored,
+            the DDL is not run until "Submit". Editing one reopens it
+            here; submitting is the single action that creates tables. */}
+        {savedDrafts.length > 0 && (
+          <div className="si-step">
+            <div className="si-step-label">
+              Saved drafts — stored in the database, no tables created yet
+            </div>
+            <table className="si-table" style={{ margin: 0 }}>
+              <thead>
+                <tr>
+                  <th>Domain</th>
+                  <th>Tables on submit</th>
+                  <th>Last saved</th>
+                  <th style={{ width: 260 }}>Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {savedDrafts.map((d) => {
+                  const tables = (d.payload as any)?.tables ?? [];
+                  return (
+                    <tr key={d.id}>
+                      <td className="si-field-name">
+                        {d.domain_name}
+                        <span style={{
+                          fontSize: 10, background: "#fef3c7", color: "#92400e",
+                          borderRadius: 4, padding: "1px 5px", marginLeft: 6, fontWeight: 600,
+                        }}>DRAFT</span>
+                      </td>
+                      <td style={{ fontSize: 12, color: "#6b7280" }}>
+                        {tables.map((t: any) => t.table_name).join(", ") || "—"}
+                      </td>
+                      <td style={{ fontSize: 11, color: "#6b7280" }}>
+                        {d.updated_at ? new Date(d.updated_at).toLocaleString() : "—"}
+                      </td>
+                      <td>
+                        <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                          <button
+                            className="btn btn-secondary"
+                            type="button"
+                            style={{ fontSize: 12 }}
+                            onClick={() => openDraft(d)}
+                            title="Reopen this draft in the form — nothing is created"
+                          >
+                            <EditOutlinedIcon sx={{ fontSize: 14 }} />Edit
+                          </button>
+                          <button
+                            className="btn btn-create-domain"
+                            type="button"
+                            style={{ fontSize: 12 }}
+                            onClick={() => submitDraft(d)}
+                            disabled={status.state === "loading" || tables.length === 0}
+                            title={`Submit — creates ${tables.length} table(s) in the database`}
+                          >
+                            <CloudUploadOutlinedIcon sx={{ fontSize: 14 }} />Submit
+                          </button>
+                          <button
+                            className="btn btn-secondary"
+                            type="button"
+                            style={{ fontSize: 12 }}
+                            onClick={() => discardDraft(d)}
+                            title="Discard this draft"
+                          >
+                            <DeleteOutlinedIcon sx={{ fontSize: 14 }} />Discard
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+
+        {/* Paused domains — click to jump back and keep adding to it.
+            Nothing here is created in the backend until its own
+            "Create Domain" is clicked; this is purely local, in-progress
+            state being parked. */}
+        {draftOrder.length > 0 && (
+          <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+            <span style={{ fontSize: 12, color: "var(--color-text-secondary)" }}>Paused — building <strong>{domainName}</strong> for:</span>
+            {draftOrder.map((name) => (
+              <button
+                key={name}
+                type="button"
+                className="btn btn-secondary"
+                onClick={() => handleResumeDraft(name)}
+                style={{ fontSize: 12, display: "inline-flex", alignItems: "center", gap: 4 }}
+                title={`Resume building "${name}"`}
+              >
+                <AddCircleOutlinedIcon sx={{ fontSize: 14 }} />
+                {name}
+              </button>
+            ))}
+          </div>
+        )}
+
+        {/* Project scope */}
+        <div className="si-step">
+          <div className="si-step-label">Project</div>
+          <div className="si-form-row si-form-row--inline">
+            <label className="si-form-label" style={{ maxWidth: 320 }}>
+              Which project is this domain under?
+              <select
+                className="si-form-select"
+                value={selectedProjectId ?? ""}
+                onChange={(e) => setSelectedProjectId(e.target.value || null)}
+              >
+                <option value="">— No project (global) —</option>
+                {projects.map((p) => (
+                  <option key={p.id} value={p.id}>{p.name}</option>
+                ))}
+              </select>
+            </label>
+            {projectsLoading && <span className="si-hint">Loading projects…</span>}
+          </div>
+        </div>
+
         {/* Step 1 */}
         <div className="si-step">
           <div className="si-step-label">Step 1 — Domain name &amp; storage</div>
@@ -852,6 +1082,20 @@ export function CreateDomainTab({ onAdd, registry = {}, domainNames = [], onQuic
                   : <><CloudUploadOutlinedIcon sx={{ fontSize: 16 }} />Create All ({draftOrder.length + 1})</>}
               </button>
             )}
+            {/* Saves the definition to the database and stops there —
+                no CREATE TABLE, no columns, nothing in the schema list.
+                Submit the draft (below) when it's ready to become real
+                tables. */}
+            <button
+              className="btn btn-secondary"
+              type="button"
+              onClick={saveDraft}
+              disabled={!validName || !hasFields || status.state === "loading"}
+              title="Save this domain model as a draft — stored in the database, no tables created until you submit it"
+            >
+              <SaveOutlinedIcon sx={{ fontSize: 16 }} />
+              {activeDraftId ? "Update Draft" : "Save as Draft"}
+            </button>
             <button className="btn btn-secondary" type="button" onClick={() => setGenerated(true)} disabled={!validName || !hasFields}>
               <CodeIcon sx={{ fontSize: 16 }} />Generate Files
             </button>
