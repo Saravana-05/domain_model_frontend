@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from "react";
+import React, { useState, useMemo, useRef, useEffect } from "react";
 import { useAuthStore } from "../../../store/authStore";
 import StorageIcon             from "@mui/icons-material/Storage";
 import LinkOutlinedIcon        from "@mui/icons-material/LinkOutlined";
@@ -30,6 +30,10 @@ export interface DomainModelTabProps {
   /** domainName -> project_id, for the project badge next to each card.
    *  Optional — omitted entirely if the caller doesn't track projects. */
   projectIds?:           Record<string, string>;
+  /** domainName -> module_id, for the module badge next to each card. */
+  moduleIds?:            Record<string, string>;
+  /** Domain to scroll into view and briefly highlight (from the sidebar tree). */
+  focusDomain?:          string | null;
   junctionDomains:       Set<string>;
   onAddField:            (domainName: string, fieldName: string, draft: FieldDraft) => void;
   onEditField:           (domainName: string, oldName: string, newName: string, draft: FieldDraft) => void;
@@ -84,7 +88,7 @@ export function inferFieldRelation(
 }
 
 export function DomainModelTab({
-  schemas, viewConfigs, dbBackends, versioned, projectIds, junctionDomains,
+  schemas, viewConfigs, dbBackends, versioned, projectIds, moduleIds, focusDomain, junctionDomains,
   onAddField, onEditField, onViewConfig, onSaveBackend, onQuickCreateDomain, onRedirectToCreate,
   onGoToCreateDomain,
   onAddValidationRule,
@@ -92,11 +96,27 @@ export function DomainModelTab({
   const registry      = schemas._layers?.validationRegistry ?? {};
   const projects      = useProjectStore((s) => s.projects);
   const projectName   = (id: string) => projects.find((p) => p.id === id)?.name ?? `Project ${id}`;
+  const modules       = useProjectStore((s) => s.modules);
+  const moduleName    = (id: string) => modules.find((m) => m.id === id)?.name ?? `Module ${id}`;
   const hasPermission = useAuthStore((s) => s.hasPermission);
   const [editing, setEditing] = useState<{ domain: string; field: string } | null>(null);
   const [expandedChildren, setExpandedChildren] = useState<Record<string, boolean>>({});
   const [jsonModalDomain, setJsonModalDomain] = useState<string | null>(null);
   const domainNames   = Object.keys(schemas.domains);
+
+  // Sidebar tree click → bring that domain's card into view. The list may
+  // still be loading when the click happens, so this re-runs as domains arrive.
+  const cardRefs = useRef<Record<string, HTMLDivElement | null>>({});
+  const [flash, setFlash] = useState<string | null>(null);
+  useEffect(() => {
+    if (!focusDomain) return;
+    const el = cardRefs.current[focusDomain];
+    if (!el) return;
+    el.scrollIntoView({ behavior: "smooth", block: "start" });
+    setFlash(focusDomain);
+    const t = setTimeout(() => setFlash(null), 1800);
+    return () => clearTimeout(t);
+  }, [focusDomain, domainNames.length]);
 
   const domainModelJson = useMemo(() => buildDomainModelJson(schemas), [schemas]);
 
@@ -116,7 +136,7 @@ export function DomainModelTab({
       </div>
       {Object.keys(schemas.domains).length === 0 && (
         <div style={{ padding: "40px 0", textAlign: "center", color: "var(--color-text-secondary, #b3abc7)" }}>
-          No domain models here yet. Use "Create Domain" above, or pick a different project from the filter.
+          No domain models here yet. Use "Create Domain" above, or pick a different project / module from the filter.
         </div>
       )}
 {Object.keys(schemas.domains).map((domainName) => {
@@ -128,7 +148,12 @@ export function DomainModelTab({
   Object.keys(fields).every((f) => f.endsWith("Id"));
 
         return (
-          <div className={`si-card ${isJunction ? "si-card--junction" : ""}`} key={domainName}>
+          <div
+            className={`si-card ${isJunction ? "si-card--junction" : ""}`}
+            key={domainName}
+            ref={(el) => { cardRefs.current[domainName] = el; }}
+            style={flash === domainName ? { outline: "2px solid #8b5cf6", outlineOffset: 2, transition: "outline-color 0.3s" } : undefined}
+          >
             <div className="si-card-header">
               <StorageIcon sx={{ fontSize: 16, color: isJunction ? "#0369a1" : "#7e22ce" }} />
               <span className="si-domain-name">{domainName}</span>
@@ -151,6 +176,9 @@ export function DomainModelTab({
               )}
               {projectIds?.[domainName] && (
                 <Badge label={projectName(projectIds[domainName])} color="purple" />
+              )}
+              {moduleIds?.[domainName] && (
+                <Badge label={moduleName(moduleIds[domainName])} color="blue" />
               )}
               <div className="si-card-header-actions">
                 <button className="si-icon-btn si-icon-btn--cloud" type="button"
@@ -190,7 +218,7 @@ export function DomainModelTab({
                        <td>
                          {isRelation ? (
                             <span className="si-relation-cell" style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
-                              <Badge label="relation 🔗" color="indigo" />
+                              <Badge label="domain_model 🔗" color="indigo" />
                               <LinkOutlinedIcon sx={{ fontSize: 11 }} />
                               <Badge label={relatedDomain} color="indigo" />
                             </span>

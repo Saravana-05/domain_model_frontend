@@ -8,7 +8,7 @@ export const FIELD_TYPES: FieldType[] = ["string", "number", "decimal", "boolean
  *  same as before. */
 export const FIELD_TYPE_LABELS: Partial<Record<FieldType, string>> = {
   string: "text",
-  relation: "domain model",
+  relation: "domain_model",
 };
 export const COMPONENTS:  ComponentType[] = ["text", "number", "select", "checkbox", "textarea", "date"];
 export const FONT_SIZES:  FontSize[]      = ["xs", "sm", "base", "lg", "xl", "2xl"];

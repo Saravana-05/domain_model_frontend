@@ -53,7 +53,7 @@ export interface DomainModelImportResult {
 }
 
 function mapImportedType(rawType: string): FieldType {
-  if (rawType === "domain model") return "relation" as FieldType; // see note in types.ts — "relation" isn't in the FieldType union but is used everywhere as a de-facto field type
+  if (rawType === "domain model" || rawType === "domain_model") return "relation" as FieldType; // see note in types.ts — "relation" isn't in the FieldType union but is used everywhere as a de-facto field type
   if (rawType === "text") return "string";
   return rawType as FieldType;
 }

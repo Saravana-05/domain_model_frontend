@@ -74,14 +74,18 @@ interface SchemaInspectorProps {
    *  {domain} domain") — so a parent tracking its own state for sidebar
    *  highlighting stays accurate even after an internal-only jump. */
   onTabChange?: (tab: MainTab) => void;
+  /** Domain model to scroll to and highlight on the Domain Model tab
+   *  (set when one is clicked in the sidebar tree). */
+  focusDomain?: string | null;
 }
 
-export const SchemaInspector = forwardRef<SchemaInspectorHandle, SchemaInspectorProps>(function SchemaInspector({ schemas, activeTab, onTabChange }, ref) {
+export const SchemaInspector = forwardRef<SchemaInspectorHandle, SchemaInspectorProps>(function SchemaInspector({ schemas, activeTab, onTabChange, focusDomain }, ref) {
   const [tab,   setTab]   = useState<MainTab>(activeTab ?? "domain");
   const [extra, setExtra] = useState<ExtraSchemaState>(EMPTY_EXTRA);
   const [backendLoadStatus, setBackendLoadStatus] = useState<string | null>(null);
   const [showImportModal, setShowImportModal] = useState(false);
   const currentProjectId = useProjectStore((s) => s.currentProjectId);
+  const currentModuleId  = useProjectStore((s) => s.currentModuleId);
 
   useImperativeHandle(ref, () => ({
     openImportModal: () => setShowImportModal(true),
@@ -137,13 +141,17 @@ export const SchemaInspector = forwardRef<SchemaInspectorHandle, SchemaInspector
   // (currentProjectId === null) shows everything, matching apiListSchemas()
   // returning the full unfiltered list in that case.
   const visibleSchemas = useMemo(() => {
-    if (!currentProjectId) return liveSchemas;
+    if (!currentProjectId && !currentModuleId) return liveSchemas;
     const domains: typeof liveSchemas.domains = {};
     for (const [name, def] of Object.entries(liveSchemas.domains)) {
-      if (extra.projectIds[name] === currentProjectId) domains[name] = def;
+      const inProject = !currentProjectId || extra.projectIds[name] === currentProjectId;
+      // Project → Module → Domain model: when a module is selected, only
+      // that module's domain models are visible.
+      const inModule  = !currentModuleId  || extra.moduleIds[name]  === currentModuleId;
+      if (inProject && inModule) domains[name] = def;
     }
     return { ...liveSchemas, domains };
-  }, [liveSchemas, extra.projectIds, currentProjectId]);
+  }, [liveSchemas, extra.projectIds, extra.moduleIds, currentProjectId, currentModuleId]);
 
 const didAutoLoad = useRef(false);
 
@@ -209,6 +217,9 @@ async function handleQuickCreateDomain(name: string, fields: QuickCreateField[])
       projectIds: currentProjectId
         ? { ...prev.projectIds, [name]: currentProjectId }
         : prev.projectIds,
+      moduleIds: currentModuleId
+        ? { ...prev.moduleIds, [name]: currentModuleId }
+        : prev.moduleIds,
     }));
 
     // Also create the actual table in the backend
@@ -311,6 +322,9 @@ async function handleQuickCreateDomain(name: string, fields: QuickCreateField[])
       projectIds: currentProjectId
         ? { ...prev.projectIds, [name]: currentProjectId }
         : prev.projectIds,
+      moduleIds: currentModuleId
+        ? { ...prev.moduleIds, [name]: currentModuleId }
+        : prev.moduleIds,
     }));
 
     // Persist relation markers (display-only, e.g. a "domain model" typed
@@ -493,6 +507,9 @@ setExtra((prev) => {
       projectIds: currentProjectId
         ? { ...prev.projectIds, ...Object.fromEntries(toAdd.map((d) => [d.name, currentProjectId])) }
         : prev.projectIds,
+      moduleIds: currentModuleId
+        ? { ...prev.moduleIds, ...Object.fromEntries(toAdd.map((d) => [d.name, currentModuleId])) }
+        : prev.moduleIds,
       junctionPairs: nextPairs,
     };
   });
@@ -1017,6 +1034,12 @@ function handleDomainCreated(payload: CreateDomainPayload) {
               ...Object.fromEntries(allNew.map((d: DomainDefinition) => [d.name, currentProjectId])),
             }
           : prev.projectIds,
+        moduleIds: currentModuleId
+          ? {
+              ...prev.moduleIds,
+              ...Object.fromEntries(allNew.map((d: DomainDefinition) => [d.name, currentModuleId])),
+            }
+          : prev.moduleIds,
         versioned: { ...prev.versioned, [payload.domain.name]: payload.versioned },
         junctionPairs: nextPairs,
       };
@@ -1227,6 +1250,7 @@ function handleViewConfig(domainName: string, cfg: DomainViewConfig) {
           };
           const dbBackend = (entry as any).db_backend ?? "postgresql";
           const entryProjectId = (entry as any).project_id ?? null;
+          const entryModuleId  = (entry as any).module_id ?? null;
           next = {
             ...next,
             newDomains: [...next.newDomains.filter((d) => d.name !== converted.domainName), domainDef],
@@ -1237,6 +1261,9 @@ function handleViewConfig(domainName: string, cfg: DomainViewConfig) {
             projectIds: entryProjectId
               ? { ...next.projectIds, [converted.domainName]: entryProjectId }
               : next.projectIds,
+            moduleIds: entryModuleId
+              ? { ...next.moduleIds, [converted.domainName]: entryModuleId }
+              : next.moduleIds,
           };
         }
         return next;
@@ -1277,8 +1304,8 @@ function handleViewConfig(domainName: string, cfg: DomainViewConfig) {
     handleLoadValidationRulesFromBackend();
   }, []);
 
-  // Re-load the domain-model list whenever the selected project changes
-  // (ProjectSelector.tsx) — skips the very first render, since the mount
+  // Re-load the domain-model list whenever the selected project or module
+  // changes (ProjectFilter / ModuleFilter in App.tsx) — skips the very first render, since the mount
   // effect above already loads with whatever project was selected on load.
   const skipInitialProjectReload = useRef(true);
   useEffect(() => {
@@ -1288,7 +1315,7 @@ function handleViewConfig(domainName: string, cfg: DomainViewConfig) {
     }
     handleLoadFromBackend();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [currentProjectId]);
+  }, [currentProjectId, currentModuleId]);
 
   return (
     <div className="si-root">
@@ -1312,6 +1339,8 @@ function handleViewConfig(domainName: string, cfg: DomainViewConfig) {
           dbBackends={extra.dbBackends}
           versioned={extra.versioned}
           projectIds={extra.projectIds}
+          moduleIds={extra.moduleIds}
+          focusDomain={focusDomain}
          junctionDomains={new Set(
   Array.from(extra.junctionPairs).flatMap((pairKey) => {
     const parts = pairKey.split("__");
