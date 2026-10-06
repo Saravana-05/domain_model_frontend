@@ -22,6 +22,7 @@ import {
   type BackendCreateResponse, type BackendCreateRequest, type BackendDraft,
 } from "../../api/datastoreApi";
 import { useProjectStore } from "../../store/projectStore";
+import { apiListModules, type BackendModule } from "../../api/moduleApi";
 import { dbLocation, Badge, CopyBlock, primaryLabel, toPascalCase, toCamelCase } from "./helpers";
 import { genDomainFile } from "./codeGenerators";
 import { FieldBuilder } from "./FieldBuilder";
@@ -56,6 +57,20 @@ export interface CreateDomainTabProps {
    *  affordance) jump the user straight to the Validations tab. */
   onGoToValidations?: () => void;
 }
+/** Read-only "chip" shown instead of a dropdown when the project / module
+ *  was already chosen by navigating the sidebar tree. */
+const lockedValueStyle: React.CSSProperties = {
+  marginTop: 6,
+  padding: "8px 12px",
+  borderRadius: 8,
+  fontSize: 14,
+  fontWeight: 600,
+  background: "rgba(139,92,246,0.14)",
+  border: "1px solid rgba(139,92,246,0.35)",
+  color: "inherit",
+  cursor: "default",
+};
+
 export interface CreateDomainPayload {
   domain:    DomainDefinition;
   uiHints:   Record<string, FieldUIConfig>;
@@ -103,10 +118,47 @@ export function CreateDomainTab({ onAdd, registry = {}, domainNames = [], onQuic
   const fetchProjects       = useProjectStore((s) => s.fetchProjects);
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(globalProjectId);
 
+  // ── Module scoping (Project → Module → Domain model) — optional, and
+  //    only meaningful once a project is chosen. Defaults to the globally
+  //    selected module; the list below is always the chosen project's own
+  //    modules, so a module from another project can never be picked. ──
+  const globalModuleId = useProjectStore((s) => s.currentModuleId);
+  const [selectedModuleId, setSelectedModuleId] = useState<string | null>(globalModuleId);
+
+  // The user normally arrives here by navigating Project → Module in the
+  // sidebar, so that choice is already made: a selected project / module is
+  // shown read-only instead of as a dropdown. Only what is NOT yet chosen
+  // (no project at all, or a project without a module) stays selectable.
+  const projectLocked = !!globalProjectId;
+  const moduleLocked  = !!globalModuleId;
+  useEffect(() => {
+    if (globalProjectId) {
+      setSelectedProjectId(globalProjectId);
+      setSelectedModuleId(globalModuleId);
+    }
+  }, [globalProjectId, globalModuleId]);
+  const [projectModules, setProjectModules]     = useState<BackendModule[]>([]);
+  const [modulesLoading, setModulesLoading]     = useState(false);
+
   useEffect(() => {
     if (projects.length === 0) fetchProjects();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  useEffect(() => {
+    if (!selectedProjectId) {
+      setProjectModules([]);
+      setSelectedModuleId(null);
+      return;
+    }
+    let cancelled = false;
+    setModulesLoading(true);
+    apiListModules(selectedProjectId)
+      .then((res) => { if (!cancelled) setProjectModules(res.data ?? []); })
+      .catch(() => { if (!cancelled) setProjectModules([]); })
+      .finally(() => { if (!cancelled) setModulesLoading(false); });
+    return () => { cancelled = true; };
+  }, [selectedProjectId]);
 
   // ── Domain stack — "pause current domain, switch to building a related
   //    one, come back later" ────────────────────────────────────────────
@@ -129,6 +181,26 @@ export function CreateDomainTab({ onAdd, registry = {}, domainNames = [], onQuic
 
   type Status = { state: "idle" | "loading" | "ok" | "err"; msg: string };
   const [status, setStatus] = useState<Status>({ state: "idle", msg: "" });
+
+  // Bumped by resetForm() — Steps 1-3 below are keyed on it, so every
+  // piece of local state inside them (the field builder's half-typed
+  // field, open relation dialogs, ...) is thrown away along with the
+  // fields, not just the state held in this component.
+  const [formKey, setFormKey] = useState(0);
+
+  /** Back to a blank form after a domain was actually created/submitted.
+   *  Keeps the things that describe WHERE you're working rather than WHAT
+   *  you were building: project, module and database backend. The result
+   *  message (status) is kept so the user still sees what was created. */
+  function resetForm() {
+    setDomainName("");
+    setFields({});
+    setGenerated(false);
+    setVersioned(false);
+    setExpandedFields({});
+    setActiveDraftId(null);
+    setFormKey((k) => k + 1);
+  }
 
   // No case restriction while typing — type it however you like. It's
   // reformatted to PascalCase at the point it's actually stored (see
@@ -433,6 +505,7 @@ export function CreateDomainTab({ onAdd, registry = {}, domainNames = [], onQuic
       registry,
     } as any);
     req.project_id = selectedProjectId;
+    req.module_id  = selectedModuleId;
     out.push({ label: "Main table", req });
 
     for (const rd of payload.relatedDomains ?? []) {
@@ -446,6 +519,7 @@ export function CreateDomainTab({ onAdd, registry = {}, domainNames = [], onQuic
         registry,
       });
       rdReq.project_id = selectedProjectId;
+      rdReq.module_id  = selectedModuleId;
       out.push({
         label: `Related domain "${rd.name}" (${Object.keys(rd.fields).length} field(s))`,
         req:   rdReq,
@@ -463,6 +537,7 @@ export function CreateDomainTab({ onAdd, registry = {}, domainNames = [], onQuic
         registry,
       });
       jReq.project_id = selectedProjectId;
+      jReq.module_id  = selectedModuleId;
       out.push({ label: `Junction table "${jd.name}"`, req: jReq });
     }
 
@@ -534,13 +609,10 @@ export function CreateDomainTab({ onAdd, registry = {}, domainNames = [], onQuic
           setVersioned(parentDraft.versioned);
           setExpandedFields(parentDraft.expandedFields);
           setGenerated(false);
+          setFormKey((k) => k + 1);
         }
       } else {
-        setDomainName("");
-        setFields({});
-        setGenerated(false);
-        setVersioned(false);
-        setExpandedFields({});
+        resetForm();
       }
     }
   }
@@ -599,11 +671,7 @@ export function CreateDomainTab({ onAdd, registry = {}, domainNames = [], onQuic
     if (!anyErr) {
       setDrafts({});
       setDraftOrder([]);
-      setDomainName("");
-      setFields({});
-      setGenerated(false);
-      setVersioned(false);
-      setExpandedFields({});
+      resetForm();
     }
   }
 
@@ -618,7 +686,7 @@ export function CreateDomainTab({ onAdd, registry = {}, domainNames = [], onQuic
 
   async function refreshSavedDrafts() {
     try {
-      const res = await apiListDrafts(selectedProjectId, "draft");
+      const res = await apiListDrafts(selectedProjectId, "draft", selectedModuleId);
       setSavedDrafts(res.drafts ?? []);
     } catch {
       // A drafts-list failure must never block building a domain —
@@ -629,7 +697,7 @@ export function CreateDomainTab({ onAdd, registry = {}, domainNames = [], onQuic
   useEffect(() => {
     refreshSavedDrafts();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedProjectId]);
+  }, [selectedProjectId, selectedModuleId]);
 
   /** Save what's currently in the form as a draft. Persists the field
    *  map (so it reopens exactly as left), the full CreateDomainPayload
@@ -646,6 +714,7 @@ export function CreateDomainTab({ onAdd, registry = {}, domainNames = [], onQuic
       const res = await apiSaveDraft({
         domain_name: payload.domain.name,
         project_id:  selectedProjectId,
+        module_id:   selectedModuleId,
         tables,
         fields,
         payload:     payload as any,
@@ -672,7 +741,8 @@ export function CreateDomainTab({ onAdd, registry = {}, domainNames = [], onQuic
     setDbBackend((p.db_backend as "postgresql" | "dynamodb") ?? "postgresql");
     setVersioned(!!p.versioned);
     setExpandedFields({});
-    setSelectedProjectId(draft.project_id ?? null);
+    if (!projectLocked) setSelectedProjectId(draft.project_id ?? null);
+    if (!moduleLocked)  setSelectedModuleId(draft.module_id ?? null);
     setActiveDraftId(draft.id);
     setGenerated(false);
     setStatus({ state: "idle", msg: `Editing draft "${draft.domain_name}" — not yet submitted.` });
@@ -699,12 +769,7 @@ export function CreateDomainTab({ onAdd, registry = {}, domainNames = [], onQuic
 
       await refreshSavedDrafts();
       if (activeDraftId === draft.id) {
-        setActiveDraftId(null);
-        setDomainName("");
-        setFields({});
-        setVersioned(false);
-        setExpandedFields({});
-        setGenerated(false);
+        resetForm();
       }
       setStatus({ state: "ok", msg: made.join(" · ") });
     } catch (err: any) {
@@ -836,24 +901,73 @@ export function CreateDomainTab({ onAdd, registry = {}, domainNames = [], onQuic
         {/* Project scope */}
         <div className="si-step">
           <div className="si-step-label">Project</div>
-          <div className="si-form-row si-form-row--inline">
-            <label className="si-form-label" style={{ maxWidth: 320 }}>
-              Which project is this domain under?
-              <select
-                className="si-form-select"
-                value={selectedProjectId ?? ""}
-                onChange={(e) => setSelectedProjectId(e.target.value || null)}
-              >
-                <option value="">— No project (global) —</option>
-                {projects.map((p) => (
-                  <option key={p.id} value={p.id}>{p.name}</option>
-                ))}
-              </select>
-            </label>
-            {projectsLoading && <span className="si-hint">Loading projects…</span>}
-          </div>
+          {projectLocked ? (
+            <div className="si-form-row si-form-row--inline">
+              <div className="si-form-label" style={{ maxWidth: 320 }}>
+                Project
+                <div style={lockedValueStyle}>
+                  {projects.find((p) => p.id === globalProjectId)?.name ?? `Project ${globalProjectId}`}
+                </div>
+              </div>
+            </div>
+          ) : (
+            <div className="si-form-row si-form-row--inline">
+              <label className="si-form-label" style={{ maxWidth: 320 }}>
+                Which project is this domain under?
+                <select
+                  className="si-form-select"
+                  value={selectedProjectId ?? ""}
+                  onChange={(e) => {
+                    // A module belongs to one project — changing the project
+                    // invalidates the module picked under the old one.
+                    setSelectedProjectId(e.target.value || null);
+                    setSelectedModuleId(null);
+                  }}
+                >
+                  <option value="">— No project (global) —</option>
+                  {projects.map((p) => (
+                    <option key={p.id} value={p.id}>{p.name}</option>
+                  ))}
+                </select>
+              </label>
+              {projectsLoading && <span className="si-hint">Loading projects…</span>}
+            </div>
+          )}
+          {selectedProjectId && (
+            moduleLocked ? (
+              <div className="si-form-row si-form-row--inline">
+                <div className="si-form-label" style={{ maxWidth: 320 }}>
+                  Module
+                  <div style={lockedValueStyle}>
+                    {projectModules.find((m) => m.id === globalModuleId)?.name ?? `Module ${globalModuleId}`}
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <div className="si-form-row si-form-row--inline">
+                <label className="si-form-label" style={{ maxWidth: 320 }}>
+                  Which module of the project?
+                  <select
+                    className="si-form-select"
+                    value={selectedModuleId ?? ""}
+                    onChange={(e) => setSelectedModuleId(e.target.value || null)}
+                  >
+                    <option value="">— No module (whole project) —</option>
+                    {projectModules.map((m) => (
+                      <option key={m.id} value={m.id}>{m.name}</option>
+                    ))}
+                  </select>
+                </label>
+                {modulesLoading && <span className="si-hint">Loading modules…</span>}
+                {!modulesLoading && projectModules.length === 0 && (
+                  <span className="si-hint">This project has no modules yet — create one from the sidebar.</span>
+                )}
+              </div>
+            )
+          )}
         </div>
 
+        <React.Fragment key={formKey}>
         {/* Step 1 */}
         <div className="si-step">
           <div className="si-step-label">Step 1 — Domain name &amp; storage</div>
@@ -925,7 +1039,7 @@ export function CreateDomainTab({ onAdd, registry = {}, domainNames = [], onQuic
                               {name}
                             </td>
                             <td>
-                              {d.type === "relation" ? <Badge label="relation" color="indigo" />
+                              {d.type === "relation" ? <Badge label="domain_model" color="indigo" />
                                 : d.type === "list" ? <Badge label="list" color="green" />
                                 : <Badge label={d.type} color="purple" />}
                             </td>
@@ -1064,7 +1178,7 @@ export function CreateDomainTab({ onAdd, registry = {}, domainNames = [], onQuic
             <button className="btn btn-create-domain" type="button" onClick={createDomain} disabled={!canCreate}>
               {status.state === "loading"
                 ? <><span className="si-spinner" />Creating tables...</>
-                : status.state === "ok"
+                : status.state === "ok" && hasFields
                   ? <><CheckIcon sx={{ fontSize: 16 }} />Domains Created</>
                   : <><CloudUploadOutlinedIcon sx={{ fontSize: 16 }} />Create Domain</>}
             </button>
@@ -1103,6 +1217,7 @@ export function CreateDomainTab({ onAdd, registry = {}, domainNames = [], onQuic
           {status.state === "ok"  && <div className="si-backend-notice si-backend-notice--ok">{status.msg}</div>}
           {status.state === "err" && <div className="si-backend-notice si-backend-notice--err">{status.msg}</div>}
         </div>
+        </React.Fragment>
 
         {generated && hasFields && (
           <div className="si-generated-layers">

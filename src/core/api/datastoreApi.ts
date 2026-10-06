@@ -53,6 +53,12 @@ export interface BackendCreateRequest {
    *  project (see ProjectSelector.tsx / projectStore.ts). Pass an
    *  explicit `null` to force "no project" even if one is selected. */
   project_id?: string | number | null;
+  /** Optional — places this domain model in a module of that project
+   *  (Project → Module → Domain model). Same defaulting rule as
+   *  project_id: omitted → the currently-selected module (only when the
+   *  project is also taken from the current selection); explicit `null`
+   *  → "no module". */
+  module_id?: string | number | null;
 }
 
 export interface BackendCreateResponse {
@@ -76,6 +82,7 @@ export interface BackendSchemaEntry {
   db_backend?: "dynamodb" | "postgresql";
   versioned?: boolean;
   project_id?: string | null;
+  module_id?: string | null;
 }
 
 export interface BackendSchemasListResponse {
@@ -359,6 +366,7 @@ export interface DraftTableSpec extends BackendCreateRequest {}
 export interface SaveDraftRequest {
   domain_name: string;
   project_id?: string | number | null;
+  module_id?:  string | number | null;
   tables:      DraftTableSpec[];
   /** Opaque builder state, round-tripped so an unfinished domain reopens
    *  exactly as it was left (the FieldDraft map + the CreateDomainPayload
@@ -373,6 +381,7 @@ export interface BackendDraft {
   id:            string;
   domain_name:   string;
   project_id:    string | null;
+  module_id?:    string | null;
   status:        "draft" | "submitted";
   payload:       SaveDraftRequest & Record<string, any>;
   created_by:    string | null;
@@ -438,6 +447,29 @@ async function apiFetch(path: string, init?: RequestInit): Promise<any> {
 }
 
 /**
+ * Project → Module scope used by every call below.
+ *  - project omitted (undefined) → use the currently-selected project, and
+ *    (if module is also omitted) the currently-selected module.
+ *  - project given explicitly   → the selected module is NOT borrowed,
+ *    because it belongs to the *selected* project and may not belong to
+ *    this one (the backend rejects a project/module mismatch). Pass
+ *    `module` explicitly to scope to a module of that project.
+ *  - explicit `null` always means "none".
+ */
+function resolveScope(
+  project: string | number | null | undefined,
+  module:  string | number | null | undefined,
+): { project_id: string | number | null; module_id: string | number | null } {
+  const state = useProjectStore.getState();
+  const project_id = project !== undefined ? project : state.currentProjectId;
+  const module_id =
+    module !== undefined ? module
+    : project === undefined ? state.currentModuleId
+    : null;
+  return { project_id, module_id };
+}
+
+/**
  * POST /datastore/create — create a table from a schema.
  *
  * If `req.project_id` isn't explicitly set, this scopes the new domain
@@ -448,14 +480,19 @@ async function apiFetch(path: string, init?: RequestInit): Promise<any> {
  * "no project" regardless of what's currently selected.
  */
 export async function apiCreateDomain(req: BackendCreateRequest): Promise<BackendCreateResponse> {
-  const project_id = req.project_id !== undefined
-    ? req.project_id
-    : useProjectStore.getState().currentProjectId;
+  const { project_id, module_id } = resolveScope(req.project_id, req.module_id);
 
-  return apiFetch("/datastore/create", {
+  const res = await apiFetch("/datastore/create", {
     method: "POST",
-    body:   JSON.stringify({ ...req, project_id: project_id ?? undefined }),
+    body:   JSON.stringify({
+      ...req,
+      project_id: project_id ?? undefined,
+      module_id:  module_id  ?? undefined,
+    }),
   });
+  // Let the sidebar tree pick up the new domain model.
+  useProjectStore.getState().bumpTree();
+  return res;
 }
 
 /**
@@ -474,13 +511,15 @@ export async function apiCreateDomain(req: BackendCreateRequest): Promise<Backen
 export async function apiSaveDraft(
   req: SaveDraftRequest,
 ): Promise<{ status: string; draft_id: string; action?: string; message?: string }> {
-  const project_id = req.project_id !== undefined
-    ? req.project_id
-    : useProjectStore.getState().currentProjectId;
+  const { project_id, module_id } = resolveScope(req.project_id, req.module_id);
 
   return apiFetch("/datastore/drafts", {
     method: "POST",
-    body:   JSON.stringify({ ...req, project_id: project_id ?? undefined }),
+    body:   JSON.stringify({
+      ...req,
+      project_id: project_id ?? undefined,
+      module_id:  module_id  ?? undefined,
+    }),
   });
 }
 
@@ -488,13 +527,13 @@ export async function apiSaveDraft(
 export async function apiListDrafts(
   projectId?: string | null,
   status: "draft" | "submitted" | "all" = "draft",
+  moduleId?: string | null,
 ): Promise<BackendDraftListResponse> {
-  const effectiveId = projectId !== undefined
-    ? projectId
-    : useProjectStore.getState().currentProjectId;
+  const { project_id: effectiveId, module_id: effectiveModule } = resolveScope(projectId, moduleId);
 
   const params = new URLSearchParams({ status });
   if (effectiveId) params.set("project_id", String(effectiveId));
+  if (effectiveModule) params.set("module_id", String(effectiveModule));
   return apiFetch(`/datastore/drafts?${params.toString()}`);
 }
 
@@ -516,7 +555,10 @@ export async function apiDeleteDraft(draftId: string): Promise<{ status: string;
  * and reports which ones failed, so it can be fixed and resubmitted.
  */
 export async function apiSubmitDraft(draftId: string): Promise<BackendSubmitDraftResponse> {
-  return apiFetch(`/datastore/drafts/${encodeURIComponent(draftId)}/submit`, { method: "POST" });
+  const res = await apiFetch(`/datastore/drafts/${encodeURIComponent(draftId)}/submit`, { method: "POST" });
+  // Submitting generates real domain models — refresh the sidebar tree.
+  useProjectStore.getState().bumpTree();
+  return res;
 }
 
 /**
@@ -526,12 +568,14 @@ export async function apiSubmitDraft(draftId: string): Promise<BackendSubmitDraf
  */
 export async function apiListSchemas(
   projectId?: string | null,
+  moduleId?: string | null,
 ): Promise<BackendSchemasListResponse> {
-  const effectiveId = projectId !== undefined
-    ? projectId
-    : useProjectStore.getState().currentProjectId;
+  const { project_id: effectiveId, module_id: effectiveModule } = resolveScope(projectId, moduleId);
 
-  const query = effectiveId ? `?project_id=${encodeURIComponent(effectiveId)}` : "";
+  const params = new URLSearchParams();
+  if (effectiveId) params.set("project_id", String(effectiveId));
+  if (effectiveModule) params.set("module_id", String(effectiveModule));
+  const query = params.toString() ? `?${params.toString()}` : "";
   return apiFetch(`/datastore/schemas${query}`);
 }
 

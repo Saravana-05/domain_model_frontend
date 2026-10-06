@@ -9,14 +9,14 @@ import { UserRolesScreen } from "./screens/rbac/UserRolesScreen";
 import { useAuthStore } from "./store/authStore";
 import { useProjectStore } from "./core/store/projectStore";
 import { ProjectsScreen } from "./screens/ProjectsScreen";
-import type { BackendProject } from "./core/api/projectApi";
+import { SidebarTree } from "../src/core/components/SidebarTree";
+import { ModulesScreen } from "./screens/ModulesScreen";
 import CloudUploadOutlinedIcon from "@mui/icons-material/CloudUploadOutlined";
 import CodeIcon                from "@mui/icons-material/Code";
-import FolderOutlinedIcon      from "@mui/icons-material/FolderOutlined";
 import FilterListIcon          from "@mui/icons-material/FilterList";
 import "./App.css";
 
-type Screen = "projects" | "inspector" | "rbac/resources" | "rbac/roles" | "rbac/permissions" | "rbac/users";
+type Screen = "projects" | "modules" | "inspector" | "rbac/resources" | "rbac/roles" | "rbac/permissions" | "rbac/users";
 
 const NAV_ITEMS: { id: Screen; label: string; group?: string }[] = [
   { id: "rbac/roles",       label: "Roles",             group: "RBAC Admin" },
@@ -54,20 +54,27 @@ function isTokenExpired(token: string): boolean {
 }
 
 /**
- * Top-right filter on the Domain Model page. Selecting a project here just
- * writes to the same projectStore.currentProjectId that the Projects page
- * writes to when you open a project — SchemaInspector already reloads the
- * domain list from the backend whenever that value changes, so picking a
- * project here filters the results shown without any extra wiring.
+ * Top-right scope filters on the Domain Model page (Project, then Module).
+ * Selecting an item just writes to the same projectStore the Projects /
+ * Modules pages write to when you open one — SchemaInspector already
+ * reloads the domain list from the backend whenever currentProjectId or
+ * currentModuleId changes, so picking one here filters the results shown
+ * without any extra wiring.
  */
-function ProjectFilter({
-  projects,
-  currentProjectId,
+function ScopeFilter({
+  items,
+  currentId,
   onSelect,
+  allLabel,
+  fallbackLabel,
+  emptyLabel,
 }: {
-  projects: BackendProject[];
-  currentProjectId: string | null;
+  items: { id: string; name: string }[];
+  currentId: string | null;
   onSelect: (id: string | null) => void;
+  allLabel: string;
+  fallbackLabel: string;
+  emptyLabel: string;
 }) {
   const [open, setOpen] = useState(false);
   const boxRef = useRef<HTMLDivElement>(null);
@@ -80,9 +87,9 @@ function ProjectFilter({
     return () => document.removeEventListener("mousedown", onDocClick);
   }, []);
 
-  const currentLabel = currentProjectId
-    ? projects.find((p) => p.id === currentProjectId)?.name ?? "Project"
-    : "All Projects";
+  const currentLabel = currentId
+    ? items.find((i) => i.id === currentId)?.name ?? fallbackLabel
+    : allLabel;
 
   return (
     <div ref={boxRef} style={{ position: "relative" }}>
@@ -99,27 +106,27 @@ function ProjectFilter({
           <div
             style={{
               ...styles.filterOption,
-              ...(currentProjectId === null ? styles.filterOptionActive : {}),
+              ...(currentId === null ? styles.filterOptionActive : {}),
             }}
             onClick={() => { onSelect(null); setOpen(false); }}
           >
-            All Projects
+            {allLabel}
           </div>
-          {projects.map((p) => (
+          {items.map((i) => (
             <div
-              key={p.id}
+              key={i.id}
               style={{
                 ...styles.filterOption,
-                ...(currentProjectId === p.id ? styles.filterOptionActive : {}),
+                ...(currentId === i.id ? styles.filterOptionActive : {}),
               }}
-              onClick={() => { onSelect(p.id); setOpen(false); }}
+              onClick={() => { onSelect(i.id); setOpen(false); }}
             >
-              {p.name}
+              {i.name}
             </div>
           ))}
-          {projects.length === 0 && (
+          {items.length === 0 && (
             <div style={{ ...styles.filterOption, cursor: "default", color: "#8a8398" }}>
-              No projects yet
+              {emptyLabel}
             </div>
           )}
         </div>
@@ -132,12 +139,22 @@ export default function App() {
   const { user, token, logout } = useAuthStore();
   const [screen, setScreen] = useState<Screen>("projects");
   const [inspectorTab, setInspectorTab] = useState<MainTab>("domain");
+  // Domain model clicked in the sidebar tree — the Domain Model tab scrolls
+  // to / highlights its card. Cleared whenever the scope is changed some
+  // other way (project / module click, filters).
+  const [focusDomain, setFocusDomain] = useState<string | null>(null);
+  // Modules page: which project it starts filtered to.
+  const [modulesProjectFilter, setModulesProjectFilter] = useState<string | null>(null);
   const schemaInspectorRef = useRef<SchemaInspectorHandle>(null);
 
   const projects            = useProjectStore((s) => s.projects);
   const currentProjectId    = useProjectStore((s) => s.currentProjectId);
   const setCurrentProjectId = useProjectStore((s) => s.setCurrentProjectId);
   const fetchProjects       = useProjectStore((s) => s.fetchProjects);
+  const modules             = useProjectStore((s) => s.modules);
+  const currentModuleId     = useProjectStore((s) => s.currentModuleId);
+  const setCurrentModuleId  = useProjectStore((s) => s.setCurrentModuleId);
+  const fetchModules        = useProjectStore((s) => s.fetchModules);
 
   const tokenExpired = !!token && isTokenExpired(token);
 
@@ -153,16 +170,62 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [token, tokenExpired]);
 
+  // Keep the module list in step with the selected project (all modules
+  // when "All Projects" is selected, so cards can still show module names).
+  useEffect(() => {
+    if (token && !tokenExpired) fetchModules();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [token, tokenExpired, currentProjectId]);
+
   if (!token || !user || tokenExpired) {
     return <LoginScreen sessionExpired={tokenExpired} />;
   }
 
-  /** Opening a project (from the Projects page) scopes every subsequent
-   *  domain-model read/create to it (via projectStore.currentProjectId,
-   *  read by datastoreApi.ts) and jumps straight to the Domain Model tab
-   *  so the user can start creating domain models inside that project. */
+  /** Project selected (sidebar tree or Projects page): make it the active
+   *  project with no module filter and show its Modules page, where the
+   *  user can open a module or create a new one. */
   function openProject(id: string) {
+    setFocusDomain(null);
     setCurrentProjectId(id);
+    setCurrentModuleId(null);
+    fetchModules(id);
+    setModulesProjectFilter(id);
+    setScreen("modules");
+  }
+
+  /** Module selected: scopes every subsequent domain-model read/create to
+   *  it (via projectStore.currentModuleId, read by datastoreApi.ts) and
+   *  jumps to the Domain Model tab. */
+  function openModule(moduleId: string, projectId: string) {
+    setFocusDomain(null);
+    // Order matters: changing project clears the module, so set project first.
+    setCurrentProjectId(projectId);
+    setCurrentModuleId(moduleId);
+    // The module list for the filters is per-project — refresh it for the
+    // project we just entered (also picks up a module created a moment ago).
+    fetchModules(projectId);
+    setScreen("inspector");
+    setInspectorTab("domain");
+  }
+
+  /** Domain model selected in the tree: scope to the module it lives in
+   *  (or its project / nothing), open the Domain Model tab and highlight
+   *  its card. */
+  function openDomain(d: { name: string; projectId: string | null; moduleId: string | null }) {
+    if (d.projectId && d.moduleId) {
+      setCurrentProjectId(d.projectId);
+      setCurrentModuleId(d.moduleId);
+      fetchModules(d.projectId);
+    } else if (d.projectId) {
+      setCurrentProjectId(d.projectId);
+      setCurrentModuleId(null);
+      fetchModules(d.projectId);
+    } else {
+      setCurrentProjectId(null);
+      setCurrentModuleId(null);
+      fetchModules(null);
+    }
+    setFocusDomain(d.name);
     setScreen("inspector");
     setInspectorTab("domain");
   }
@@ -177,19 +240,13 @@ export default function App() {
         </div>
 
         <nav style={styles.nav}>
-          <div style={styles.navGroup}>Projects</div>
-          <button
-            type="button"
-            style={{
-              ...styles.navItem,
-              ...styles.navItemWithIcon,
-              ...(screen === "projects" ? styles.navItemActive : {}),
-            }}
-            onClick={() => setScreen("projects")}
-          >
-            <FolderOutlinedIcon sx={{ fontSize: 16 }} style={{ flexShrink: 0 }} />
-            <span>Projects</span>
-          </button>
+          <SidebarTree
+            activeDomain={screen === "inspector" ? focusDomain : null}
+            onSelectProject={openProject}
+            onSelectModule={openModule}
+            onSelectDomain={openDomain}
+            onOpenProjectsPage={() => setScreen("projects")}
+          />
 
           <div style={styles.navGroup}>Domain Model</div>
           {INSPECTOR_TABS.map((item) => (
@@ -237,20 +294,46 @@ export default function App() {
       {/* Main content */}
       <main style={styles.main}>
         {screen === "projects" && <ProjectsScreen onOpenProject={openProject} />}
+        {screen === "modules" && (
+          <ModulesScreen
+            onOpenModule={openModule}
+            initialProjectId={modulesProjectFilter}
+          />
+        )}
         {screen === "inspector" && (
           <>
             <div style={styles.pageHeader}>
               <div>
                 <h1 style={styles.pageTitle}>Domain Model Configurator</h1>
-                
+                <p style={styles.pageSub}>
+                  {[
+                    currentProjectId ? (projects.find((p) => p.id === currentProjectId)?.name ?? "Project") : "All projects",
+                    currentModuleId  ? (modules.find((m) => m.id === currentModuleId)?.name ?? "Module") : null,
+                  ].filter(Boolean).join("  ›  ")}
+                </p>
               </div>
               <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
                 {inspectorTab === "domain" && (
-                  <ProjectFilter
-                    projects={projects}
-                    currentProjectId={currentProjectId}
-                    onSelect={setCurrentProjectId}
-                  />
+                  <>
+                    <ScopeFilter
+                      items={projects}
+                      currentId={currentProjectId}
+                      onSelect={(id) => { setFocusDomain(null); setCurrentProjectId(id); }}
+                      allLabel="All Projects"
+                      fallbackLabel="Project"
+                      emptyLabel="No projects yet"
+                    />
+                    {currentProjectId && (
+                      <ScopeFilter
+                        items={modules}
+                        currentId={currentModuleId}
+                        onSelect={(id) => { setFocusDomain(null); setCurrentModuleId(id); }}
+                        allLabel="All Modules"
+                        fallbackLabel="Module"
+                        emptyLabel="No modules in this project"
+                      />
+                    )}
+                  </>
                 )}
                 <button
                   className="page-header-btn page-header-btn--import"
@@ -279,6 +362,7 @@ export default function App() {
               schemas={allSchemas}
               activeTab={inspectorTab}
               onTabChange={setInspectorTab}
+              focusDomain={focusDomain}
             />
           </>
         )}
@@ -292,7 +376,7 @@ export default function App() {
 }
 
 const styles: Record<string, React.CSSProperties> = {
-  sidebar:      { width: 220, background: "#2a2438", display: "flex", flexDirection: "column", flexShrink: 0 },
+  sidebar:      { width: 260, background: "#2a2438", display: "flex", flexDirection: "column", flexShrink: 0 },
   brand:        { display: "flex", alignItems: "center", gap: 10, padding: "20px 16px", borderBottom: "1px solid rgba(255,255,255,0.08)" },
   brandIcon:    { fontSize: 22 },
   brandName:    { color: "#f5f3fa", fontWeight: 700, fontSize: 16 },

@@ -123,7 +123,7 @@ export function DataTab({ schemas, dbBackends = {} }: { schemas: AllSchemas; dbB
                       <label className="si-data-field-label">
                         {label}
                         <span className="si-data-field-type">
-                          {isRelation ? <><Badge label="relation" color="indigo" /> → {(fieldDef as any).relatedDomain ?? "?"}</>
+                          {isRelation ? <><Badge label="domain_model" color="indigo" /> → {(fieldDef as any).relatedDomain ?? "?"}</>
                             : isList ? <><Badge label="list" color="green" /> → {(fieldDef as any).listDomain ?? "?"}</>
                             : fieldDef.type}
                         </span>
