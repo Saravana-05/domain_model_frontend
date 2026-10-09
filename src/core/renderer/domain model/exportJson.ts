@@ -1,3 +1,4 @@
+import { toCamelCase } from "../../schema/casting";
 import type { AllSchemas, FieldUIConfig, NamedValidationRule } from "../../schema/types";
 
 //
@@ -11,22 +12,20 @@ import type { AllSchemas, FieldUIConfig, NamedValidationRule } from "../../schem
 // stored in.
 
 /**
- * Instead of a generic role: "parent"|"child" enum, the KEY NAME itself
- * carries the relationship semantics:
- *  - association → { kind: "association", linked_with: <domain> }
- *  - integral, this domain is the child (the real stored FK) →
- *      { kind: "integral", part_of: <parent domain> }
- *  - integral, this domain is the parent (the synthesized reverse
- *    attribute — see synthesizeReverseAttributes below) →
- *      { kind: "integral", contains: <child domain> }
- * Each variant only ever has ONE of linked_with/part_of/contains — never
- * more than one, and the key itself is enough to tell which side/kind of
- * relationship this is without a separate role field.
+ * Relationship metadata for a relation attribute:
+ *  - linked_to         → the other domain model
+ *  - relationship_type → "association" (loose reference, junction table) or
+ *                        "integral" (composition — the child only exists
+ *                        under its owner)
+ *  - owned_by          → for integral links, the owning (parent) domain —
+ *                        the same on both sides of the link; "NA" for
+ *                        associations, which have no owner.
  */
-export type ExportedRelation =
-  | { kind: "association"; linked_with: string }
-  | { kind: "integral"; part_of: string }
-  | { kind: "integral"; contains: string };
+export interface ExportedRelation {
+  linked_to: string;
+  relationship_type: "association" | "integral";
+  owned_by: string;
+}
 
 export interface ExportedDomainField {
   attribute_id: string;
@@ -58,54 +57,84 @@ export function pluralize(word: string): string {
   return `${word}s`;
 }
 
+/** Junction tables (`A_B` with exactly the two FK columns `AId` and `BId`)
+ *  are an implementation detail of associations — recreated on import — so
+ *  they're left out of the export. */
+function isJunctionDomain(name: string, fields: Record<string, any>): boolean {
+  const keys = Object.keys(fields);
+  if (keys.length !== 2 || !name.includes("_")) return false;
+  const [a, ...rest] = name.split("_");
+  const b = rest.join("_");
+  return keys.includes(`${a}Id`) && keys.includes(`${b}Id`);
+}
+
+/** A child-side integral FK is a single-valued "xId" field; the parent-side
+ *  link is the to-many attribute (e.g. vehicleModels). */
+function isChildFk(fieldName: string, fieldDef: any): boolean {
+  return fieldDef.cardinality !== "list" && /Id$/.test(fieldName);
+}
+
+/** Resolves the related domain even when only the FK naming convention
+ *  survives (the backend doesn't persist relatedDomain, so after a reload a
+ *  FK like manufacturerId is a plain string with relationKind "integral"). */
+function resolveRelatedDomain(fieldName: string, fieldDef: any, allDomains: AllSchemas["domains"]): string {
+  if (fieldDef.relatedDomain) return fieldDef.relatedDomain;
+  if (fieldName.endsWith("Id")) {
+    const stem = fieldName.slice(0, -2).toLowerCase();
+    const match = Object.keys(allDomains).find((d) => d.toLowerCase() === stem);
+    if (match) return match;
+  }
+  return "";
+}
+
 /**
- * For every domain, finds every OTHER domain with an "integral" relation
- * pointing AT it (e.g. branch.clinic_id → clinic) and synthesizes a
- * virtual "many" attribute representing the reverse direction (e.g.
- * clinic gets a synthesized "branches" attribute, tagged `contains:
- * "branch"`). This attribute has no real backing column anywhere — it
- * exists only in this export, to make the parent→children relationship
- * visible from the parent's own side too, not just discoverable by
- * scanning every other domain for FKs. No `validations` key is added
- * here — there's no real validation registry entry for a field that
- * doesn't actually exist, so nothing is fabricated for it.
+ * Synthesizes the parent-side attribute for every integral FK pointing AT
+ * this domain (e.g. VehicleModel.manufacturerId → Manufacturer gives
+ * Manufacturer a "vehicleModels" attribute), unless the parent already has
+ * an explicit attribute linking to that child. It has no backing column —
+ * it only makes the parent→children link visible from the parent's side.
  */
 export function synthesizeReverseAttributes(domainName: string, allDomains: AllSchemas["domains"]): ExportedDomainField[] {
   const reverse: ExportedDomainField[] = [];
+  const ownFields = allDomains[domainName]?.fields ?? {};
   for (const [childDomainName, childDef] of Object.entries(allDomains)) {
-    if (childDomainName === domainName) continue;
-    for (const fieldDef of Object.values(childDef.fields)) {
-      const relationKind = (fieldDef as any).relationKind;
-      if (relationKind === "integral" && fieldDef.relatedDomain === domainName) {
-        reverse.push({
-          attribute_id: pluralize(childDomainName),
-          type: "text",
-          cardinality: "many",
-          related_domain_model: { kind: "integral", contains: childDomainName },
-        });
-      }
-    }
+    if (childDomainName === domainName || isJunctionDomain(childDomainName, childDef.fields)) continue;
+    const hasFkToMe = Object.entries(childDef.fields).some(([fn, fd]) =>
+      (fd as any).relationKind === "integral" && isChildFk(fn, fd) && resolveRelatedDomain(fn, fd, allDomains) === domainName);
+    if (!hasFkToMe) continue;
+    const alreadyExplicit = Object.entries(ownFields).some(([fn, fd]) =>
+      (fd as any).relationKind === "integral" && !isChildFk(fn, fd) && fd.relatedDomain === childDomainName);
+    if (alreadyExplicit) continue;
+    reverse.push({
+      attribute_id: toCamelCase(pluralize(childDomainName)),
+      type: "domain_model",
+      cardinality: "many",
+      related_domain_model: { linked_to: childDomainName, relationship_type: "integral", owned_by: domainName },
+    });
   }
   return reverse;
 }
 
 export function buildDomainModelJson(schemas: AllSchemas): { domain_models: ExportedDomain[] } {
-  const domain_models: ExportedDomain[] = Object.entries(schemas.domains).map(([domainName, def]) => {
+  const domain_models: ExportedDomain[] = Object.entries(schemas.domains)
+    .filter(([domainName, def]) => !isJunctionDomain(domainName, def.fields))
+    .map(([domainName, def]) => {
     const realAttributes: ExportedDomainField[] = Object.entries(def.fields).map(([fieldName, fieldDef]) => {
+      const relationKind = (fieldDef as any).relationKind;
+      const isRelation = fieldDef.type === "relation" || relationKind === "association" || relationKind === "integral";
       const out: ExportedDomainField = {
         attribute_id: fieldName,
-        type: fieldDef.type === "relation" ? "domain model" : fieldDef.type === "string" ? "text" : fieldDef.type,
-        cardinality: fieldDef.cardinality === "list" ? "many" : "one",
+        type: isRelation ? "domain_model" : fieldDef.type === "string" ? "text" : fieldDef.type,
+        cardinality: fieldDef.cardinality === "list" || fieldDef.cardinality === "many" ? "many" : "one",
       };
-      const relationKind = (fieldDef as any).relationKind;
-      const relatedDomain = fieldDef.relatedDomain ?? "";
+      const relatedDomain = resolveRelatedDomain(fieldName, fieldDef, schemas.domains);
       if (relationKind === "association") {
-        out.related_domain_model = { kind: "association", linked_with: relatedDomain };
+        out.related_domain_model = { linked_to: relatedDomain, relationship_type: "association", owned_by: "NA" };
       } else if (relationKind === "integral") {
-        // This is always the real stored FK (the child side) — the
-        // synthesized reverse/parent side is added separately below via
-        // synthesizeReverseAttributes, never here.
-        out.related_domain_model = { kind: "integral", part_of: relatedDomain };
+        // Child side (real stored FK): owner is the related domain.
+        // Parent side (explicit to-many attribute): owner is this domain.
+        const owner = isChildFk(fieldName, fieldDef) ? relatedDomain : domainName;
+        out.related_domain_model = { linked_to: relatedDomain, relationship_type: "integral", owned_by: owner };
       }
       const validationRefs = schemas._layers?.validationRefs?.[`${domainName}.${fieldName}`];
       if (validationRefs && validationRefs.length > 0) out.validations = validationRefs;
@@ -114,7 +143,20 @@ export function buildDomainModelJson(schemas: AllSchemas): { domain_models: Expo
 
     const reverseAttributes = synthesizeReverseAttributes(domainName, schemas.domains);
 
-    return { name: domainName, attributes: [...realAttributes, ...reverseAttributes] };
+    // Every domain's table has an implicit primary key (the backend's own
+    // "id" column) that never appears as a user-defined field. Surface it
+    // as the first attribute — `<domain>Id`, unique + required — unless the
+    // domain already declares its own (`<domain>Id` or `id`).
+    const primaryKeyName = `${toCamelCase(domainName)}Id`;
+    const hasOwnPrimaryKey = Object.keys(def.fields).some((f) => f === primaryKeyName || f === "id");
+    const primaryKey: ExportedDomainField[] = hasOwnPrimaryKey ? [] : [{
+      attribute_id: primaryKeyName,
+      type: "text",
+      cardinality: "one",
+      validations: ["unique", "required"],
+    }];
+
+    return { name: domainName, attributes: [...primaryKey, ...realAttributes, ...reverseAttributes] };
   });
   return { domain_models };
 }

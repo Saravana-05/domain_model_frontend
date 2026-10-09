@@ -584,6 +584,55 @@ export async function apiGetSchema(tableName: string): Promise<BackendSchemaResp
   return apiFetch(`/datastore/schemas/${tableName}`);
 }
 
+/** DELETE /datastore/schemas/{table} — delete a domain model (and by default its table + data) */
+export async function apiDeleteDomain(
+  tableName: string,
+  dropTable = true,
+): Promise<{ status: string; table_name?: string }> {
+  const res = await apiFetch(
+    `/datastore/schemas/${encodeURIComponent(tableName)}?drop_table=${dropTable}`,
+    { method: "DELETE" },
+  );
+  useProjectStore.getState().bumpTree();
+  return res;
+}
+
+/** PUT /datastore/schemas/{table} — rename a domain model and/or move it to another project/module */
+export async function apiUpdateDomain(
+  tableName: string,
+  body: { new_table_name?: string; project_id?: string | number | null; module_id?: string | number | null },
+): Promise<{ status: string; table_name?: string; old_name?: string }> {
+  const res = await apiFetch(`/datastore/schemas/${encodeURIComponent(tableName)}`, {
+    method: "PUT",
+    body:   JSON.stringify(body),
+  });
+  useProjectStore.getState().bumpTree();
+  return res;
+}
+
+/** DELETE /datastore/schemas/{table}/fields/{field} — delete one attribute */
+export async function apiDeleteField(
+  tableName: string,
+  fieldId: string,
+): Promise<{ status: string }> {
+  return apiFetch(
+    `/datastore/schemas/${encodeURIComponent(tableName)}/fields/${encodeURIComponent(fieldId)}`,
+    { method: "DELETE" },
+  );
+}
+
+/** PUT /datastore/schemas/{table}/fields/{field} — rename and/or retype one attribute */
+export async function apiUpdateField(
+  tableName: string,
+  fieldId: string,
+  body: { new_field_id?: string; type?: BackendFieldType; label?: string },
+): Promise<{ status: string; field_id?: string }> {
+  return apiFetch(
+    `/datastore/schemas/${encodeURIComponent(tableName)}/fields/${encodeURIComponent(fieldId)}`,
+    { method: "PUT", body: JSON.stringify(body) },
+  );
+}
+
 /** POST /datastore/{table_name}/row — insert a data row */
 export async function apiInsertRow(
   tableName: string,
