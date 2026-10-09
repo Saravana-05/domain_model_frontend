@@ -377,7 +377,7 @@ export function CreateDomainTab({ onAdd, registry = {}, domainNames = [], onQuic
         // dangles (you can still give it real attributes later via the
         // "Create {domain} domain" button or the Domain Model tab).
         if (d.isPartOf === "fk") {
-          domainFields[n] = { type: "relation", relatedDomain: d.relatedDomain, relationKind: d.relationKind };
+          domainFields[n] = { type: "relation", relatedDomain: d.relatedDomain, relationKind: d.relationKind, cardinality: (d.cardinality as any) || undefined };
           const fp = `${name}.${n}`;
           const hint = draftToUIHint(d);
           uiHints[fp] = Object.keys(hint).length ? hint : { label: primaryLabel(d.labels, n) };
@@ -398,7 +398,7 @@ export function CreateDomainTab({ onAdd, registry = {}, domainNames = [], onQuic
           const parentIdField = `${name}Id`;
           upsertRelatedDomain(d.relatedDomain, { [parentIdField]: { type: "string", relationKind: "integral" } });
 
-          domainFields[n] = { type: "relation", relatedDomain: d.relatedDomain, relationKind: "integral", isMarkerOnly: true } as any;
+          domainFields[n] = { type: "relation", relatedDomain: d.relatedDomain, relationKind: "integral", cardinality: (d.cardinality as any) || undefined, isMarkerOnly: true } as any;
           const fp = `${name}.${n}`;
           uiHints[fp] = { label: primaryLabel(d.labels, n) };
           continue;
@@ -418,6 +418,10 @@ export function CreateDomainTab({ onAdd, registry = {}, domainNames = [], onQuic
             },
           });
         }
+        // Display-only marker so the association shows up in the Domain
+        // Model table and in the exported JSON (never a backend column).
+        domainFields[n] = { type: "relation", relatedDomain: d.relatedDomain, relationKind: "association", cardinality: (d.cardinality as any) || undefined, isMarkerOnly: true } as any;
+        uiHints[`${name}.${n}`] = { label: primaryLabel(d.labels, n) };
         const targetKnown = !!schemas?.domains?.[d.relatedDomain] || !!externalKnownFields[d.relatedDomain];
         if (!targetKnown && !relatedDomains.find((r) => r.name === d.relatedDomain)) {
           relatedDomains.push({ name: d.relatedDomain, fields: {} });

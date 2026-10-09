@@ -1048,6 +1048,11 @@ body {
 }
 .si-edit-btn:hover { background: var(--border); border-color: var(--border-strong); color: var(--text-primary); }
 .si-edit-btn--active { background: var(--indigo-bg); border-color: #818cf8; color: var(--indigo-text); }
+.si-edit-btn--danger,
+.si-icon-btn--danger { background: rgba(239, 68, 68, 0.10); border-color: rgba(239, 68, 68, 0.45); color: #f87171; }
+.si-edit-btn--danger:hover,
+.si-icon-btn--danger:hover { background: rgba(239, 68, 68, 0.22); border-color: #ef4444; color: #fca5a5; }
+.si-edit-btn:disabled { opacity: 0.55; cursor: default; }
 
 /* ── Inline edit row ─────────────────────────────────────────────────────── */
 .si-edit-row { padding: 0 !important; background: var(--surface-alt) !important; }

@@ -15,6 +15,11 @@ import {
   backendSchemaToFrontend,
   apiCreateDomain,
   apiListSchemas,
+  apiDeleteDomain,
+  apiDeleteField,
+  apiUpdateDomain,
+  apiUpdateField,
+  frontendTypeToBackend,
   apiSaveAttribute,
   apiSaveAttributeTranslation,
   apiListValidationRules,
@@ -397,7 +402,20 @@ async function handleQuickCreateDomain(name: string, fields: QuickCreateField[])
         nextExtraFields[domain.name] = { ...(nextExtraFields[domain.name] ?? {}), ...domain.fields };
         if (!nextDbBackends[domain.name]) nextDbBackends[domain.name] = "postgresql";
       }
-      return { ...prev, extraFields: nextExtraFields, dbBackends: nextDbBackends };
+      // Tag imported domains with the current project/module — otherwise the
+      // project/module filter (visibleSchemas) hides them.
+      const importedNames = result.domains.map((d) => d.name);
+      return {
+        ...prev,
+        extraFields: nextExtraFields,
+        dbBackends: nextDbBackends,
+        projectIds: currentProjectId
+          ? { ...prev.projectIds, ...Object.fromEntries(importedNames.map((n) => [n, currentProjectId])) }
+          : prev.projectIds,
+        moduleIds: currentModuleId
+          ? { ...prev.moduleIds, ...Object.fromEntries(importedNames.map((n) => [n, currentModuleId])) }
+          : prev.moduleIds,
+      };
     });
 
     for (const [domName, markers] of Object.entries(result.relationMarkers)) {
@@ -412,9 +430,13 @@ async function handleQuickCreateDomain(name: string, fields: QuickCreateField[])
     let created = 0;
     let failed = 0;
     for (const domain of result.domains) {
-      // Relation-marker fields never become real backend columns.
+      // Display-only relation markers (parent-side integral links and
+      // associations) never become columns, but a child's real FK does —
+      // send it as a plain string column, like everywhere else in this file.
       const backendFields = Object.fromEntries(
-        Object.entries(domain.fields).filter(([, f]) => f.type !== "relation")
+        Object.entries(domain.fields)
+          .filter(([, f]) => f.type !== "relation" || (f.relationKind === "integral" && f.cardinality !== "list" && !!f.relatedDomain))
+          .map(([k, f]) => [k, f.type === "relation" ? { ...f, type: "string" as FieldType } : f])
       );
       if (Object.keys(backendFields).length === 0) continue;
       try {
@@ -432,6 +454,10 @@ async function handleQuickCreateDomain(name: string, fields: QuickCreateField[])
       } catch {
         failed++;
       }
+    }
+    // Association links → junction tables.
+    for (const { a, b } of result.associations) {
+      await ensureJunctionDomain(a, b, "postgresql");
     }
     setBackendLoadStatus(
       `✅ Imported ${result.totalDomains} domain model(s), ${result.totalAttributes} attribute(s)` +
@@ -896,6 +922,20 @@ if (draft.isPartOf === "fk") {
       if (isRename && updatedUIHints[oldPath]) { updatedUIHints[newPath] = updatedUIHints[oldPath]; delete updatedUIHints[oldPath]; }
       if (Object.values(uiHint).some((v) => v !== undefined)) updatedUIHints[newPath] = uiHint;
 
+      // The full save below only ADDS columns, so a rename or type change
+      // has to be applied to the existing column first — otherwise the old
+      // column (and its data) is left behind next to a new empty one.
+      if (lastBackendDomainNames.current.has(domainName)) {
+        const oldType = (liveSchemas.domains[domainName]?.fields as any)?.[oldName]?.type;
+        const typeChanged = !!oldType && oldType !== updatedField.type;
+        if (isRename || typeChanged) {
+          await apiUpdateField(domainName, oldName, {
+            new_field_id: isRename ? newName : undefined,
+            type:         typeChanged ? frontendTypeToBackend(updatedField.type as string) : undefined,
+          });
+        }
+      }
+
       const req = domainToBackendRequest({
         registry: liveSchemas._layers?.validationRegistry ?? {},
         domainName, fields: rawFields as any, uiHints: updatedUIHints as any,
@@ -1147,6 +1187,122 @@ function handleViewConfig(domainName: string, cfg: DomainViewConfig) {
     setTimeout(() => setBackendLoadStatus(null), 3000);
   }
 
+  // ── Edit / delete domain models and their attributes ───────────────────
+
+  /** Drop every trace of a domain (or a renamed-away name) from local state. */
+  function purgeDomainLocally(name: string) {
+    const prefix = `${name}.`;
+    const dropKeys = <T,>(rec: Record<string, T>) =>
+      Object.fromEntries(Object.entries(rec).filter(([k]) => k !== name && !k.startsWith(prefix)));
+    setExtra((prev) => ({
+      ...prev,
+      newDomains:  prev.newDomains.filter((d) => d.name !== name),
+      extraFields: dropKeys(prev.extraFields),
+      uiHints:     dropKeys(prev.uiHints),
+      rbacRules:   dropKeys(prev.rbacRules),
+      abacRules:   dropKeys(prev.abacRules),
+      viewConfigs: dropKeys(prev.viewConfigs),
+      dbBackends:  dropKeys(prev.dbBackends),
+      versioned:   dropKeys(prev.versioned),
+      projectIds:  dropKeys(prev.projectIds),
+      moduleIds:   dropKeys(prev.moduleIds),
+    }));
+    lastBackendDomainNames.current.delete(name);
+  }
+
+  function flash(msg: string, ms = 4000) {
+    setBackendLoadStatus(msg);
+    setTimeout(() => setBackendLoadStatus(null), ms);
+  }
+
+  async function handleDeleteDomain(domainName: string) {
+    try {
+      if (lastBackendDomainNames.current.has(domainName)) {
+        await apiDeleteDomain(domainName);
+      }
+      purgeDomainLocally(domainName);
+      flash(`✅ Domain model "${domainName}" deleted.`);
+    } catch (err: any) {
+      flash(`❌ Could not delete "${domainName}": ${err?.message ?? String(err)}`, 6000);
+    }
+  }
+
+  async function handleRenameDomain(oldName: string, newName: string) {
+    const next = newName.trim();
+    if (!next || next === oldName) return;
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(next)) {
+      flash("⚠️ Domain names can only use letters, digits and underscores, and can't start with a digit.", 6000);
+      return;
+    }
+    if (liveSchemas.domains[next]) {
+      flash(`⚠️ A domain model named "${next}" already exists.`, 5000);
+      return;
+    }
+    try {
+      if (lastBackendDomainNames.current.has(oldName)) {
+        await apiUpdateDomain(oldName, { new_table_name: next });
+        purgeDomainLocally(oldName);
+        await handleLoadFromBackend();
+      } else {
+        // Not saved yet — rename in local state only.
+        const oldPrefix = `${oldName}.`;
+        const rekey = <T,>(rec: Record<string, T>) =>
+          Object.fromEntries(Object.entries(rec).map(([k, v]) => [
+            k === oldName ? next : k.startsWith(oldPrefix) ? `${next}.${k.slice(oldPrefix.length)}` : k, v,
+          ]));
+        setExtra((prev) => ({
+          ...prev,
+          newDomains:  prev.newDomains.map((d) => (d.name === oldName ? { ...d, name: next } : d)),
+          extraFields: rekey(prev.extraFields),
+          uiHints:     rekey(prev.uiHints),
+          rbacRules:   rekey(prev.rbacRules),
+          abacRules:   rekey(prev.abacRules),
+          viewConfigs: rekey(prev.viewConfigs),
+          dbBackends:  rekey(prev.dbBackends),
+          versioned:   rekey(prev.versioned),
+          projectIds:  rekey(prev.projectIds),
+          moduleIds:   rekey(prev.moduleIds),
+        }));
+      }
+      flash(`✅ Renamed "${oldName}" → "${next}".`);
+    } catch (err: any) {
+      flash(`❌ Could not rename "${oldName}": ${err?.message ?? String(err)}`, 6000);
+    }
+  }
+
+  async function handleDeleteField(domainName: string, fieldName: string) {
+    try {
+      if (lastBackendDomainNames.current.has(domainName)) {
+        await apiDeleteField(domainName, fieldName);
+      }
+      const path = `${domainName}.${fieldName}`;
+      setExtra((prev) => {
+        const without = <T,>(rec: Record<string, T>) => {
+          const c = { ...rec }; delete c[path]; return c;
+        };
+        const extraFields = { ...prev.extraFields };
+        if (extraFields[domainName]) {
+          const f = { ...extraFields[domainName] }; delete f[fieldName]; extraFields[domainName] = f;
+        }
+        return {
+          ...prev,
+          newDomains: prev.newDomains.map((d) => {
+            if (d.name !== domainName) return d;
+            const fields = { ...d.fields }; delete fields[fieldName];
+            return { ...d, fields };
+          }),
+          extraFields,
+          uiHints:   without(prev.uiHints),
+          rbacRules: without(prev.rbacRules),
+          abacRules: without(prev.abacRules),
+        };
+      });
+      flash(`✅ Field "${fieldName}" deleted from "${domainName}".`);
+    } catch (err: any) {
+      flash(`❌ Could not delete "${fieldName}": ${err?.message ?? String(err)}`, 6000);
+    }
+  }
+
   async function handleSaveDomainToBackend(domainName: string) {
     const domainDef = liveSchemas.domains[domainName];
     if (!domainDef) return;
@@ -1351,6 +1507,9 @@ function handleViewConfig(domainName: string, cfg: DomainViewConfig) {
 )}
           onAddField={handleAddFieldToExisting}
           onEditField={handleEditField}
+          onDeleteField={handleDeleteField}
+          onDeleteDomain={handleDeleteDomain}
+          onRenameDomain={handleRenameDomain}
           onViewConfig={handleViewConfig}
           onSaveBackend={handleSaveDomainToBackend}
           onQuickCreateDomain={handleQuickCreateDomain}

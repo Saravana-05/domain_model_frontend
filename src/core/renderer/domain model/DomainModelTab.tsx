@@ -5,6 +5,9 @@ import LinkOutlinedIcon        from "@mui/icons-material/LinkOutlined";
 import CloudUploadOutlinedIcon from "@mui/icons-material/CloudUploadOutlined";
 import AddCircleOutlinedIcon   from "@mui/icons-material/AddCircleOutlined";
 import EditOutlinedIcon        from "@mui/icons-material/EditOutlined";
+import DeleteOutlineIcon       from "@mui/icons-material/DeleteOutlined";
+import CheckIcon               from "@mui/icons-material/Check";
+import CloseIcon               from "@mui/icons-material/Close";
 import ExpandMoreIcon          from "@mui/icons-material/ExpandMore";
 import ExpandLessIcon          from "@mui/icons-material/ExpandLess";
 import LabelIcon               from "@mui/icons-material/Label";
@@ -37,6 +40,12 @@ export interface DomainModelTabProps {
   junctionDomains:       Set<string>;
   onAddField:            (domainName: string, fieldName: string, draft: FieldDraft) => void;
   onEditField:           (domainName: string, oldName: string, newName: string, draft: FieldDraft) => void;
+  /** Delete one attribute of a domain model (backend + local state). */
+  onDeleteField?:        (domainName: string, fieldName: string) => void | Promise<void>;
+  /** Delete a whole domain model (backend table + schema + local state). */
+  onDeleteDomain?:       (domainName: string) => void | Promise<void>;
+  /** Rename a domain model. */
+  onRenameDomain?:       (oldName: string, newName: string) => void | Promise<void>;
   onViewConfig:          (domainName: string, cfg: DomainViewConfig) => void;
   onSaveBackend:         (domainName: string) => void;
   onQuickCreateDomain:   (name: string, fields: QuickCreateField[]) => void;
@@ -79,8 +88,11 @@ export function inferFieldRelation(
     return { isRelation: true, relatedDomain: fieldDef.relatedDomain };
   }
   if (fieldName.endsWith("Id")) {
-    const inferredDomain = fieldName.slice(0, -2);
-    if (schemas.domains?.[inferredDomain]) {
+    const stem = fieldName.slice(0, -2);
+    // Domain names are PascalCase, FK names camelCase ("libraryId" → "Library"),
+    // so match case-insensitively.
+    const inferredDomain = Object.keys(schemas.domains ?? {}).find((d) => d.toLowerCase() === stem.toLowerCase());
+    if (inferredDomain) {
       return { isRelation: true, relatedDomain: inferredDomain };
     }
   }
@@ -89,7 +101,7 @@ export function inferFieldRelation(
 
 export function DomainModelTab({
   schemas, viewConfigs, dbBackends, versioned, projectIds, moduleIds, focusDomain, junctionDomains,
-  onAddField, onEditField, onViewConfig, onSaveBackend, onQuickCreateDomain, onRedirectToCreate,
+  onAddField, onEditField, onDeleteField, onDeleteDomain, onRenameDomain, onViewConfig, onSaveBackend, onQuickCreateDomain, onRedirectToCreate,
   onGoToCreateDomain,
   onAddValidationRule,
 }: DomainModelTabProps) {
@@ -98,7 +110,15 @@ export function DomainModelTab({
   const projectName   = (id: string) => projects.find((p) => p.id === id)?.name ?? `Project ${id}`;
   const modules       = useProjectStore((s) => s.modules);
   const moduleName    = (id: string) => modules.find((m) => m.id === id)?.name ?? `Module ${id}`;
-  const hasPermission = useAuthStore((s) => s.hasPermission);
+  // Designing domain models is separate from the per-record permissions
+  // (view/create/edit on a domain's DATA) that hasPermission() checks — a
+  // freshly created domain has no such permission rows, which is what left
+  // every field showing 🔒. Any signed-in user can edit/delete here; swap
+  // this for a hasPermission("domain_model", "edit") check to restrict it.
+  const canManage = useAuthStore((s) => !!s.user);
+  const [renaming, setRenaming] = useState<{ domain: string; value: string } | null>(null);
+  const [confirmDel, setConfirmDel] = useState<{ domain: string; field?: string } | null>(null);
+  const [busy, setBusy] = useState(false);
   const [editing, setEditing] = useState<{ domain: string; field: string } | null>(null);
   const [expandedChildren, setExpandedChildren] = useState<Record<string, boolean>>({});
   const [jsonModalDomain, setJsonModalDomain] = useState<string | null>(null);
@@ -156,7 +176,30 @@ export function DomainModelTab({
           >
             <div className="si-card-header">
               <StorageIcon sx={{ fontSize: 16, color: isJunction ? "#0369a1" : "#7e22ce" }} />
-              <span className="si-domain-name">{domainName}</span>
+              {renaming?.domain === domainName ? (
+                <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+                  <input
+                    autoFocus
+                    className="si-form-input"
+                    style={{ height: 26, fontSize: 13, padding: "0 8px", minWidth: 160 }}
+                    value={renaming.value}
+                    onChange={(e) => setRenaming({ domain: domainName, value: e.target.value })}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") { onRenameDomain?.(domainName, renaming.value); setRenaming(null); }
+                      if (e.key === "Escape") setRenaming(null);
+                    }}
+                  />
+                  <button className="si-edit-btn" type="button" title="Save name"
+                    onClick={() => { onRenameDomain?.(domainName, renaming.value); setRenaming(null); }}>
+                    <CheckIcon sx={{ fontSize: 13 }} />
+                  </button>
+                  <button className="si-edit-btn" type="button" title="Cancel" onClick={() => setRenaming(null)}>
+                    <CloseIcon sx={{ fontSize: 13 }} />
+                  </button>
+                </span>
+              ) : (
+                <span className="si-domain-name">{domainName}</span>
+              )}
               <span className="si-field-count">{fieldNames.length} fields</span>
               {isJunction ? (
                 <span className="si-layer-tag si-layer-tag--junction">
@@ -181,6 +224,22 @@ export function DomainModelTab({
                 <Badge label={moduleName(moduleIds[domainName])} color="blue" />
               )}
               <div className="si-card-header-actions">
+                {canManage && !isJunction && (
+                  <button className="si-icon-btn" type="button"
+                    title="Edit domain model (rename)"
+                    onClick={() => setRenaming({ domain: domainName, value: domainName })}>
+                    <EditOutlinedIcon sx={{ fontSize: 15 }} />
+                    <span>Edit</span>
+                  </button>
+                )}
+                {canManage && (
+                  <button className="si-icon-btn si-icon-btn--danger" type="button"
+                    title="Delete domain model"
+                    onClick={() => setConfirmDel({ domain: domainName })}>
+                    <DeleteOutlineIcon sx={{ fontSize: 15 }} />
+                    <span>Delete</span>
+                  </button>
+                )}
                 <button className="si-icon-btn si-icon-btn--cloud" type="button"
                   title="Save to backend" onClick={() => onSaveBackend(domainName)}>
                   <CloudUploadOutlinedIcon sx={{ fontSize: 15 }} />
@@ -223,13 +282,14 @@ export function DomainModelTab({
                               <Badge label={relatedDomain} color="indigo" />
                             </span>
                           ) : (
-                            <Badge label={fieldDef.type} color="purple" />
+                            <Badge label={fieldDef.type === "string" ? "text" : fieldDef.type} color="purple" />
                           )}
                         </td>
                       <td>
-                          {(fieldDef as any).cardinality
-                            ? <Badge label={(fieldDef as any).cardinality} color="blue" />
-                            : <span className="si-muted">—</span>}
+                          <Badge
+                            label={(fieldDef as any).cardinality === "list" || (fieldDef as any).cardinality === "many" ? "many" : "one"}
+                            color="blue"
+                          />
                         </td>
                         <td>{fieldDef.format ? <Badge label={fieldDef.format} color="blue" /> : <span className="si-muted">—</span>}</td>
                         <td>
@@ -244,17 +304,27 @@ export function DomainModelTab({
                           )}
                         </td>
                         <td>
-                          {!isJunction && hasPermission(domainName, "edit") ? (
-                            <button
-                              className={`si-edit-btn ${isEditing ? "si-edit-btn--active" : ""}`}
-                              type="button"
-                              onClick={() => setEditing(isEditing ? null : { domain: domainName, field: fieldName })}
-                              title="Edit field">
-                              <EditOutlinedIcon sx={{ fontSize: 13 }} />
-                              {isEditing ? "Close" : "Edit"}
-                            </button>
+                          {!isJunction && canManage ? (
+                            <span style={{ display: "inline-flex", gap: 6 }}>
+                              <button
+                                className={`si-edit-btn ${isEditing ? "si-edit-btn--active" : ""}`}
+                                type="button"
+                                onClick={() => setEditing(isEditing ? null : { domain: domainName, field: fieldName })}
+                                title="Edit field">
+                                <EditOutlinedIcon sx={{ fontSize: 13 }} />
+                                {isEditing ? "Close" : "Edit"}
+                              </button>
+                              <button
+                                className="si-edit-btn si-edit-btn--danger"
+                                type="button"
+                                onClick={() => setConfirmDel({ domain: domainName, field: fieldName })}
+                                title="Delete field">
+                                <DeleteOutlineIcon sx={{ fontSize: 13 }} />
+                                Delete
+                              </button>
+                            </span>
                           ) : (
-                            <span style={{ fontSize: 12, color: "#9ca3af" }} title={isJunction ? "Junction fields are auto-managed" : "No edit permission"}>
+                            <span style={{ fontSize: 12, color: "#9ca3af" }} title={isJunction ? "Junction fields are auto-managed" : "Sign in to edit"}>
                               {isJunction ? "🔗" : "🔒"}
                             </span>
                           )}
@@ -408,6 +478,49 @@ export function DomainModelTab({
       <div className="si-tip">
         <span>💡 Use the <strong>Create Domain</strong> tab to add a brand-new domain. Relation fields automatically generate a <strong>junction table</strong> (e.g. <code>student_subject</code>).</span>
       </div>
+
+      {confirmDel && (
+        <div
+          style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.55)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000 }}
+          onClick={() => !busy && setConfirmDel(null)}
+        >
+          <div
+            style={{ background: "var(--color-background-primary, #1f1b2e)", color: "var(--color-text-primary, #fff)", border: "1px solid var(--color-border-tertiary, #3b3552)", borderRadius: 12, padding: 22, width: 440, maxWidth: "92vw" }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div style={{ fontSize: 16, fontWeight: 700, marginBottom: 8 }}>
+              {confirmDel.field ? `Delete field "${confirmDel.field}"?` : `Delete domain model "${confirmDel.domain}"?`}
+            </div>
+            <div style={{ fontSize: 13, color: "var(--color-text-secondary, #b3abc7)", lineHeight: 1.5, marginBottom: 18 }}>
+              {confirmDel.field
+                ? <>This removes the attribute from <strong>{confirmDel.domain}</strong>, drops its column and deletes any data stored in it.</>
+                : <>This deletes <strong>{confirmDel.domain}</strong>, its table and <strong>all its data</strong>. Junction tables and relation fields in other domains that point to it are not removed.</>}
+              {" "}This can't be undone.
+            </div>
+            <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+              <button className="si-edit-btn" type="button" disabled={busy} onClick={() => setConfirmDel(null)}>Cancel</button>
+              <button
+                className="si-edit-btn si-edit-btn--danger"
+                type="button"
+                disabled={busy}
+                onClick={async () => {
+                  setBusy(true);
+                  try {
+                    if (confirmDel.field) await onDeleteField?.(confirmDel.domain, confirmDel.field);
+                    else                  await onDeleteDomain?.(confirmDel.domain);
+                  } finally {
+                    setBusy(false);
+                    setConfirmDel(null);
+                  }
+                }}
+              >
+                <DeleteOutlineIcon sx={{ fontSize: 13 }} />
+                {busy ? "Deleting…" : "Delete"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       <DomainJsonModal
         open={!!jsonModalDomain}
