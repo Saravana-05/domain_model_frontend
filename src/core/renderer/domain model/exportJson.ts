@@ -1,5 +1,5 @@
 import { toCamelCase } from "../../schema/casting";
-import type { AllSchemas, FieldUIConfig, NamedValidationRule } from "../../schema/types";
+import type { AllSchemas, FieldUIConfig, NamedValidationRule, RBACFieldRule, ABACFieldRule } from "../../schema/types";
 
 //
 // Two independent, attribute_id-referenced structures, matching the layer
@@ -27,6 +27,21 @@ export interface ExportedRelation {
   owned_by: string;
 }
 
+/** One ABAC rule: { name, effect, roles, conditions? } — no ids, no actions, no fields. */
+export type ExportedAbacRule = Record<string, any>;
+
+/**
+ * Access control embedded directly on the attribute it applies to.
+ * Every key is optional and omitted when empty.
+ *  - rbac            → field-level role arrays: { visible?: string[], read?, write?, disabled? }
+ *  - abac_expression → field-level runtime expressions: { visible?: string|boolean, disabled?, read?, write? }
+ */
+export interface ExportedAccess {
+  rbac?: RBACFieldRule;
+  abac?: ExportedAbacRule[];
+  abac_expression?: ABACFieldRule;
+}
+
 export interface ExportedDomainField {
   attribute_id: string;
   type: string;
@@ -39,10 +54,26 @@ export interface ExportedDomainField {
    *  present when non-empty, matching how branch.active (no validations)
    *  omits the key entirely rather than showing an empty array. */
   validations?: string[];
+  /** RBAC / ABAC rules for this attribute — only present when at least one is defined. */
+  access?: ExportedAccess;
+}
+
+/**
+ * Domain-level access control (the Access Control screen's data, stored in the backend):
+ *  - rbac → role name → actions that role may perform on this domain model,
+ *           e.g. { "Admin": ["create","view","edit","delete"], "Viewer": ["view"] }
+ *  - abac → ABAC rules (ids stripped): name, effect, roles and optional conditions.
+ *           Rules are domain-level only; there is no per-field targeting.
+ */
+export interface ExportedDomainAccess {
+  rbac?: Record<string, string[]>;
+  abac?: ExportedAbacRule[];
 }
 
 export interface ExportedDomain {
   name: string;
+  /** Domain-level RBAC / ABAC — only present when something is configured for this domain. */
+  access?: ExportedDomainAccess;
   attributes: ExportedDomainField[];
 }
 
@@ -115,7 +146,23 @@ export function synthesizeReverseAttributes(domainName: string, allDomains: AllS
   return reverse;
 }
 
-export function buildDomainModelJson(schemas: AllSchemas): { domain_models: ExportedDomain[] } {
+/** Looks up the RBAC / ABAC rule stored under "domain.attribute" and returns
+ *  them as one inline block (or undefined when the attribute has neither). */
+function buildAccessBlock(schemas: AllSchemas, path: string): ExportedAccess | undefined {
+  const rbac = schemas._layers?.rbac?.fields?.[path];
+  const abac = schemas._layers?.abac?.rules?.[path];
+  const out: ExportedAccess = {};
+  if (rbac && Object.keys(rbac).length > 0) out.rbac = rbac;
+  if (abac && Object.keys(abac).length > 0) out.abac_expression = abac;
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
+export function buildDomainModelJson(
+  schemas: AllSchemas,
+  /** Domain-level RBAC/ABAC keyed by domain name (see loadDomainAccess in accessLoader.ts). */
+  domainAccess: Record<string, ExportedDomainAccess> = {},
+): { domain_models: ExportedDomain[] } {
+  const accessByLower = new Map(Object.entries(domainAccess).map(([k, v]) => [k.toLowerCase(), v]));
   const domain_models: ExportedDomain[] = Object.entries(schemas.domains)
     .filter(([domainName, def]) => !isJunctionDomain(domainName, def.fields))
     .map(([domainName, def]) => {
@@ -138,6 +185,8 @@ export function buildDomainModelJson(schemas: AllSchemas): { domain_models: Expo
       }
       const validationRefs = schemas._layers?.validationRefs?.[`${domainName}.${fieldName}`];
       if (validationRefs && validationRefs.length > 0) out.validations = validationRefs;
+      const access = buildAccessBlock(schemas, `${domainName}.${fieldName}`);
+      if (access) out.access = access;
       return out;
     });
 
@@ -149,14 +198,32 @@ export function buildDomainModelJson(schemas: AllSchemas): { domain_models: Expo
     // domain already declares its own (`<domain>Id` or `id`).
     const primaryKeyName = `${toCamelCase(domainName)}Id`;
     const hasOwnPrimaryKey = Object.keys(def.fields).some((f) => f === primaryKeyName || f === "id");
+    const primaryKeyAccess = buildAccessBlock(schemas, `${domainName}.${primaryKeyName}`);
     const primaryKey: ExportedDomainField[] = hasOwnPrimaryKey ? [] : [{
       attribute_id: primaryKeyName,
       type: "text",
       cardinality: "one",
       validations: ["unique", "required"],
+      ...(primaryKeyAccess ? { access: primaryKeyAccess } : {}),
     }];
 
-    return { name: domainName, attributes: [...primaryKey, ...realAttributes, ...reverseAttributes] };
+    const allAttributes = [...primaryKey, ...realAttributes, ...reverseAttributes];
+
+    // ABAC: rules are domain-level (name, effect, roles, conditions). A leftover
+    // `fields` key on rules saved earlier is dropped, so no empty `fields: []` is exported.
+    const domainLevelAccess = accessByLower.get(domainName.toLowerCase());
+    const domainAbac: ExportedAbacRule[] = (domainLevelAccess?.abac ?? []).map((rule) => {
+      const { fields: _legacyFields, ...ruleBody } = rule as any;
+      return ruleBody;
+    });
+    const domainAccessOut: ExportedDomainAccess = {};
+    if (domainLevelAccess?.rbac && Object.keys(domainLevelAccess.rbac).length) domainAccessOut.rbac = domainLevelAccess.rbac;
+    if (domainAbac.length) domainAccessOut.abac = domainAbac;
+    return {
+      name: domainName,
+      ...(domainAccessOut.rbac || domainAccessOut.abac ? { access: domainAccessOut } : {}),
+      attributes: allAttributes,
+    };
   });
   return { domain_models };
 }

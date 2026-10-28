@@ -1,4 +1,6 @@
 import { useEffect, useState, useCallback } from "react";
+import type { CSSProperties } from "react";
+import { c, common, checkboxAccent } from "./rbacTheme";
 import {
   apiListRoles,
   apiListResources,
@@ -18,13 +20,15 @@ type ViewMode = "table" | "resource" | "role";
 
 // ── Action colour palette ──────────────────────────────────────────────────────
 const ACTION_COLORS: Record<string, { bg: string; text: string; border: string }> = {
-  create: { bg: "#dbeafe", text: "#1e40af", border: "#bfdbfe" },
-  view:   { bg: "#dcfce7", text: "#166534", border: "#bbf7d0" },
-  edit:   { bg: "#fef9c3", text: "#854d0e", border: "#fde68a" },
-  delete: { bg: "#fee2e2", text: "#991b1b", border: "#fca5a5" },
+  create: c.blue,
+  view:   c.green,
+  edit:   c.amber,
+  delete: c.red,
 };
+const OFF = { bg: "rgba(255,255,255,0.05)", border: "rgba(255,255,255,0.10)", text: "#6b6480" };
+
 function actionColor(action: string) {
-  return ACTION_COLORS[action] ?? { bg: "#f3f4f6", text: "#374151", border: "#e5e7eb" };
+  return ACTION_COLORS[action] ?? { bg: "rgba(167,139,250,0.12)", text: "#c4b0fa", border: "rgba(139,92,246,0.35)" };
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -136,16 +140,16 @@ export function RolePermissionsScreen() {
   // ── Derived helpers ────────────────────────────────────────────────────────
   const totalPerms  = resources.reduce((n, r) => n + r.permissions.length, 0);
 
-  if (loading) return <div style={s.center}>Loading…</div>;
+  if (loading) return <div style={common.center}>Loading…</div>;
 
   return (
-    <div style={s.page}>
+    <div style={common.page}>
 
       {/* ── Page header ── */}
-      <div style={s.pageHeader}>
+      <div style={common.header}>
         <div>
-          <h2 style={s.heading}>Roles &amp; Permissions</h2>
-          <p style={s.sub}>
+          <h1 style={common.title}>Roles &amp; Permissions</h1>
+          <p style={common.subtitle}>
             {roles.length} role{roles.length !== 1 ? "s" : ""} · {resources.length} resource{resources.length !== 1 ? "s" : ""} · {totalPerms} permissions
           </p>
         </div>
@@ -154,7 +158,8 @@ export function RolePermissionsScreen() {
             <span style={s.dirtyBadge}>{dirty.size} unsaved</span>
           )}
           <button
-            style={{ ...s.saveBtn, opacity: dirty.size === 0 ? 0.45 : 1 }}
+            className="page-header-btn page-header-btn--import"
+            style={{ opacity: dirty.size === 0 ? 0.45 : 1 }}
             onClick={saveAll}
             disabled={saving || dirty.size === 0}
           >
@@ -164,10 +169,10 @@ export function RolePermissionsScreen() {
       </div>
 
       {/* ── Alerts ── */}
-      {error  && <div style={s.error}>{error}</div>}
-      {toast  && <div style={s.successBanner}>{toast}</div>}
-      {roles.length === 0     && <div style={s.warn}>No roles yet — create roles first.</div>}
-      {resources.length === 0 && <div style={s.warn}>No resources yet — sync domain models first.</div>}
+      {error  && <div style={common.error}>{error}</div>}
+      {toast  && <div style={common.success}>{toast}</div>}
+      {roles.length === 0     && <div style={common.warn}>No roles yet — create roles first.</div>}
+      {resources.length === 0 && <div style={common.warn}>No resources yet — sync domain models first.</div>}
 
       {roles.length > 0 && resources.length > 0 && (
         <>
@@ -229,96 +234,85 @@ export function RolePermissionsScreen() {
 // ════════════════════════════════════════════════════════════════════════════
 
 function TableView({
-  roles, resources, grants, onToggle, onToggleResource: _onToggleResource,
+  roles, resources, grants, onToggle, onToggleResource,
 }: {
   roles: Role[]; resources: Resource[]; grants: Grants;
   onToggle: (roleId: string, permId: string) => void;
   onToggleResource: (roleId: string, res: Resource, on: boolean) => void;
 }) {
+  // Rows = resources (domain models), columns = roles. Each cell holds that
+  // role's action toggles for the resource, so the table grows downward
+  // (vertical scroll) instead of sideways.
   return (
     <div style={s.tableWrap}>
       <table style={s.matrix}>
         <thead>
-          {/* Resource name row */}
           <tr>
-            <th style={{ ...s.th, ...s.thRole, background: "#f8f9fc" }}></th>
-            {resources.map(res => (
-              <th
-                key={res.id}
-                colSpan={res.permissions.length || 1}
-                style={{ ...s.th, ...s.thResource }}
-              >
-                <span style={s.resNameBadge}>{res.name}</span>
+            <th style={{ ...s.th, ...s.thRole, zIndex: 3 }}>Resource</th>
+            {roles.map(role => (
+              <th key={role.id} style={{ ...s.th, ...s.thSticky }}>
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }}>
+                  <div style={{ ...s.roleAvatar, width: 26, height: 26, fontSize: 12 }}>{role.name[0].toUpperCase()}</div>
+                  <span style={s.roleName}>{role.name}</span>
+                </div>
               </th>
             ))}
           </tr>
-          {/* Action name row */}
-          <tr>
-            <th style={{ ...s.th, ...s.thRole }}>Role</th>
-            {resources.map(res =>
-              res.permissions.length === 0 ? (
-                <th key={res.id} style={{ ...s.th, ...s.thAction }}>—</th>
-              ) : (
-                res.permissions.map(p => {
-                  const c = actionColor(p.action);
-                  return (
-                    <th key={p.id} style={{ ...s.th, ...s.thAction }}>
-                      <span style={{ ...s.actionChip, background: c.bg, color: c.text, border: `1px solid ${c.border}` }}>
-                        {p.action}
-                      </span>
-                    </th>
-                  );
-                })
-              )
-            )}
-          </tr>
         </thead>
         <tbody>
-          {roles.map((role, ri) => {
-            const g = grants[role.id] ?? new Set();
-            return (
-              <tr key={role.id} style={{ background: ri % 2 === 0 ? "#fff" : "#f9fafb" }}>
-                {/* Role name cell */}
-                <td style={s.tdRole}>
-                  <div style={s.roleNameCell}>
-                    <div style={s.roleAvatar}>{role.name[0].toUpperCase()}</div>
-                    <span style={s.roleName}>{role.name}</span>
-                  </div>
-                </td>
-                {/* Permission checkboxes */}
-                {resources.map(res =>
-                  res.permissions.length === 0 ? (
-                    <td key={res.id} style={s.td}><span style={{ color: "#d1d5db" }}>—</span></td>
-                  ) : (
-                    res.permissions.map(p => {
-                      const checked = g.has(p.id);
-                      const c = actionColor(p.action);
-                      return (
-                        <td key={p.id} style={s.td}>
-                          <label style={s.checkCell}>
-                            <input
-                              type="checkbox"
-                              checked={checked}
-                              onChange={() => onToggle(role.id, p.id)}
-                              style={{ display: "none" }}
-                            />
-                            <span style={{
-                              ...s.matrixCheck,
-                              background: checked ? c.bg : "#f3f4f6",
-                              border: `1.5px solid ${checked ? c.border : "#e5e7eb"}`,
-                              color: checked ? c.text : "#d1d5db",
-                            }}>
-                              {checked ? "✓" : "—"}
-                            </span>
-                          </label>
-                        </td>
-                      );
-                    })
-                  )
-                )}
-              </tr>
-            );
-          })}
+          {resources.map((res, ri) => (
+            <tr key={res.id} style={{ background: ri % 2 === 0 ? c.card : "#2f2840" }}>
+              <td style={s.tdRole}>
+                <div style={s.roleNameCell}>
+                  <div style={{ ...s.resIcon, width: 30, height: 30, fontSize: 13 }}>{res.name[0].toUpperCase()}</div>
+                  <span style={s.roleName}>{res.name}</span>
+                </div>
+              </td>
+              {roles.map(role => {
+                const g = grants[role.id] ?? new Set<string>();
+                const allOn = res.permissions.length > 0 && res.permissions.every(p => g.has(p.id));
+                const anyOn = res.permissions.some(p => g.has(p.id));
+                return (
+                  <td key={role.id} style={s.td}>
+                    {res.permissions.length === 0 ? (
+                      <span style={{ color: OFF.text }}>—</span>
+                    ) : (
+                      <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 6, flexWrap: "wrap" }}>
+                        <label style={{ ...s.allToggle, marginLeft: 0 }} title="Toggle all">
+                          <input
+                            type="checkbox"
+                            style={checkboxAccent}
+                            checked={allOn}
+                            ref={el => { if (el) el.indeterminate = anyOn && !allOn; }}
+                            onChange={e => onToggleResource(role.id, res, e.target.checked)}
+                          />
+                        </label>
+                        {res.permissions.map(p => {
+                          const checked = g.has(p.id);
+                          const ac = actionColor(p.action);
+                          return (
+                            <label key={p.id} style={s.permLabel}>
+                              <input type="checkbox" checked={checked} onChange={() => onToggle(role.id, p.id)} style={{ display: "none" }} />
+                              <span style={{
+                                ...s.permChip,
+                                padding: "3px 9px",
+                                fontSize: 11,
+                                background: checked ? ac.bg : OFF.bg,
+                                color: checked ? ac.text : OFF.text,
+                                border: `1.5px solid ${checked ? ac.border : OFF.border}`,
+                              }}>
+                                {p.action}
+                              </span>
+                            </label>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </td>
+                );
+              })}
+            </tr>
+          ))}
         </tbody>
       </table>
     </div>
@@ -352,9 +346,9 @@ function ResourceView({
             {/* Action headers */}
             <div style={{ display: "flex", gap: 8 }}>
               {res.permissions.map(p => {
-                const c = actionColor(p.action);
+                const ac = actionColor(p.action);
                 return (
-                  <span key={p.id} style={{ ...s.actionChip, background: c.bg, color: c.text, border: `1px solid ${c.border}`, minWidth: 56, textAlign: "center" }}>
+                  <span key={p.id} style={{ ...s.actionChip, background: ac.bg, color: ac.text, border: `1px solid ${ac.border}`, minWidth: 56, textAlign: "center" }}>
                     {p.action}
                   </span>
                 );
@@ -369,36 +363,37 @@ function ResourceView({
               const allOn = res.permissions.length > 0 && res.permissions.every(p => g.has(p.id));
               const anyOn = res.permissions.some(p => g.has(p.id));
               return (
-                <div key={role.id} style={{ ...s.roleRow, background: ri % 2 === 0 ? "#fff" : "#f9fafb" }}>
+                <div key={role.id} style={{ ...s.roleRow, background: ri % 2 === 0 ? c.card : "#2f2840" }}>
                   {/* Role name + "all" toggle */}
                   <div style={{ display: "flex", alignItems: "center", gap: 10, flex: 1 }}>
                     <div style={{ ...s.roleAvatar, width: 28, height: 28, fontSize: 12 }}>
                       {role.name[0].toUpperCase()}
                     </div>
-                    <span style={{ fontSize: 14, fontWeight: 500, color: "#111" }}>{role.name}</span>
+                    <span style={{ fontSize: 14, fontWeight: 600, color: c.text }}>{role.name}</span>
                     <label style={s.allToggle}>
                       <input
                         type="checkbox"
+                        style={checkboxAccent}
                         checked={allOn}
                         ref={el => { if (el) el.indeterminate = anyOn && !allOn; }}
                         onChange={e => onToggleResource(role.id, res, e.target.checked)}
                       />
-                      <span style={{ fontSize: 12, color: "#9ca3af" }}>All</span>
+                      <span style={{ fontSize: 12, color: c.textSub }}>All</span>
                     </label>
                   </div>
                   {/* Per-action checkboxes */}
                   <div style={{ display: "flex", gap: 8 }}>
                     {res.permissions.map(p => {
                       const checked = g.has(p.id);
-                      const c = actionColor(p.action);
+                      const ac = actionColor(p.action);
                       return (
                         <label key={p.id} style={{ ...s.checkCell, minWidth: 56, justifyContent: "center" }}>
                           <input type="checkbox" checked={checked} onChange={() => onToggle(role.id, p.id)} style={{ display: "none" }} />
                           <span style={{
                             ...s.matrixCheck,
-                            background: checked ? c.bg : "#f3f4f6",
-                            border: `1.5px solid ${checked ? c.border : "#e5e7eb"}`,
-                            color: checked ? c.text : "#d1d5db",
+                            background: checked ? ac.bg : OFF.bg,
+                            border: `1.5px solid ${checked ? ac.border : OFF.border}`,
+                            color: checked ? ac.text : OFF.text,
                           }}>
                             {checked ? "✓" : "—"}
                           </span>
@@ -464,7 +459,7 @@ function RoleView({
                     </span>
                   );
                 })}
-                <span style={{ color: "#9ca3af", fontSize: 18 }}>{isOpen ? "▲" : "▼"}</span>
+                <span style={{ color: c.textMuted, fontSize: 18 }}>{isOpen ? "▲" : "▼"}</span>
               </div>
             </div>
 
@@ -475,31 +470,32 @@ function RoleView({
                   const allOn = res.permissions.length > 0 && res.permissions.every(p => g.has(p.id));
                   const anyOn = res.permissions.some(p => g.has(p.id));
                   return (
-                    <div key={res.id} style={{ ...s.roleRow, background: ri % 2 === 0 ? "#fff" : "#f9fafb" }}>
+                    <div key={res.id} style={{ ...s.roleRow, background: ri % 2 === 0 ? c.card : "#2f2840" }}>
                       {/* Resource name + "all" toggle */}
                       <div style={{ display: "flex", alignItems: "center", gap: 10, flex: 1 }}>
                         <div style={{ ...s.resIcon, width: 28, height: 28, fontSize: 12 }}>
                           {res.name[0].toUpperCase()}
                         </div>
-                        <span style={{ fontSize: 14, fontWeight: 500, color: "#111" }}>{res.name}</span>
+                        <span style={{ fontSize: 14, fontWeight: 600, color: c.text }}>{res.name}</span>
                         <label style={s.allToggle}>
                           <input
                             type="checkbox"
+                            style={checkboxAccent}
                             checked={allOn}
                             ref={el => { if (el) el.indeterminate = anyOn && !allOn; }}
                             onChange={e => onToggleResource(role.id, res, e.target.checked)}
                           />
-                          <span style={{ fontSize: 12, color: "#9ca3af" }}>All</span>
+                          <span style={{ fontSize: 12, color: c.textSub }}>All</span>
                         </label>
                       </div>
                       {/* Per-action permission chips */}
                       <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
                         {res.permissions.length === 0 ? (
-                          <span style={{ fontSize: 12, color: "#d1d5db" }}>No permissions defined</span>
+                          <span style={{ fontSize: 12, color: c.textMuted }}>No permissions defined</span>
                         ) : (
                           res.permissions.map(p => {
                             const checked = g.has(p.id);
-                            const c = actionColor(p.action);
+                            const ac = actionColor(p.action);
                             return (
                               <label key={p.id} style={s.permLabel}>
                                 <input
@@ -510,9 +506,9 @@ function RoleView({
                                 />
                                 <span style={{
                                   ...s.permChip,
-                                  background: checked ? c.bg : "#f3f4f6",
-                                  color: checked ? c.text : "#9ca3af",
-                                  border: `1.5px solid ${checked ? c.border : "#e5e7eb"}`,
+                                  background: checked ? ac.bg : OFF.bg,
+                                  color: checked ? ac.text : OFF.text,
+                                  border: `1.5px solid ${checked ? ac.border : OFF.border}`,
                                 }}>
                                   {checked ? "✓" : "○"} {p.action}
                                 </span>
@@ -534,56 +530,49 @@ function RoleView({
 }
 
 // ── Styles ────────────────────────────────────────────────────────────────────
-const s: Record<string, React.CSSProperties> = {
-  page:         { padding: "24px 32px", maxWidth: 1100, margin: "0 auto" },
-  pageHeader:   { display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 20, gap: 16 },
-  heading:      { fontSize: 20, fontWeight: 700, margin: "0 0 4px", color: "#111" },
-  sub:          { margin: 0, color: "#6b7280", fontSize: 13 },
-  center:       { textAlign: "center", padding: 40, color: "#888" },
-  error:        { background: "#fee2e2", color: "#b91c1c", borderRadius: 8, padding: "10px 16px", marginBottom: 14, fontSize: 13 },
-  warn:         { background: "#fef9c3", color: "#854d0e", border: "1px solid #fde68a", borderRadius: 8, padding: "10px 16px", marginBottom: 12, fontSize: 13 },
-  successBanner:{ background: "#dcfce7", color: "#166534", borderRadius: 8, padding: "10px 16px", marginBottom: 14, fontSize: 13, fontWeight: 500 },
-  saveBtn:      { padding: "10px 24px", borderRadius: 8, border: "none", background: "#059669", color: "#fff", fontWeight: 700, cursor: "pointer", fontSize: 14, transition: "opacity 0.15s" },
-  dirtyBadge:   { padding: "4px 12px", borderRadius: 20, background: "#fef3c7", color: "#92400e", fontSize: 12, fontWeight: 600 },
+const rowBorder = "1px solid rgba(255,255,255,0.06)";
+const s: Record<string, CSSProperties> = {
+  dirtyBadge:   { padding: "4px 12px", borderRadius: 20, background: c.amber.bg, color: c.amber.text, border: `1px solid ${c.amber.border}`, fontSize: 12, fontWeight: 700 },
 
   // Tabs
-  tabBar:       { display: "flex", gap: 4, marginBottom: 20, borderBottom: "2px solid #e5e7eb", paddingBottom: 0 },
-  tab:          { padding: "10px 20px", border: "none", background: "transparent", cursor: "pointer", fontSize: 14, fontWeight: 500, color: "#6b7280", borderBottom: "2px solid transparent", marginBottom: -2, borderRadius: "6px 6px 0 0", transition: "all 0.15s" },
-  tabActive:    { color: "#4f46e5", borderBottom: "2px solid #4f46e5", fontWeight: 700, background: "#f5f3ff" },
+  tabBar:       { display: "flex", gap: 4, marginBottom: 20, borderBottom: `1px solid ${c.border}` },
+  tab:          { padding: "10px 18px", border: "none", background: "transparent", cursor: "pointer", fontSize: 14, fontWeight: 600, color: c.textSub, borderBottom: "2px solid transparent", marginBottom: -1, borderRadius: "8px 8px 0 0", transition: "all 0.15s", fontFamily: "inherit" },
+  tabActive:    { color: "#fff", borderBottom: `2px solid ${c.accent}`, background: c.accentSoft },
 
   // Table view
-  tableWrap:    { overflowX: "auto", borderRadius: 10, border: "1px solid #e5e7eb", background: "#fff" },
+  tableWrap:    { overflow: "auto", maxHeight: "calc(100vh - 300px)", minHeight: 240, borderRadius: 12, border: `1px solid ${c.border}`, background: c.card },
   matrix:       { borderCollapse: "collapse", width: "100%", fontSize: 13 },
-  th:           { padding: "10px 12px", textAlign: "center", fontWeight: 600, borderBottom: "1px solid #e5e7eb", whiteSpace: "nowrap" },
-  thRole:       { textAlign: "left", background: "#f8f9fc", minWidth: 160, position: "sticky", left: 0, zIndex: 1, borderRight: "1px solid #e5e7eb" },
-  thResource:   { background: "#f0f0ff", borderLeft: "2px solid #e5e7eb", color: "#4f46e5" },
-  thAction:     { background: "#fafafa", color: "#6b7280", borderLeft: "1px solid #f3f4f6" },
-  td:           { padding: "8px 10px", textAlign: "center", borderBottom: "1px solid #f3f4f6", borderLeft: "1px solid #f3f4f6" },
-  tdRole:       { padding: "10px 14px", borderBottom: "1px solid #f3f4f6", borderRight: "1px solid #e5e7eb", background: "#fff", position: "sticky", left: 0, zIndex: 1 },
+  th:           { padding: "10px 12px", textAlign: "center", fontWeight: 600, borderBottom: `1px solid ${c.border}`, whiteSpace: "nowrap", color: c.textSub },
+  thSticky:     { position: "sticky", top: 0, zIndex: 2, background: c.cardRaised, minWidth: 200 },
+  thRole:       { textAlign: "left", background: c.cardRaised, minWidth: 200, position: "sticky", top: 0, left: 0, zIndex: 1, borderRight: `1px solid ${c.border}` },
+  thResource:   { background: "rgba(139,92,246,0.14)", borderLeft: `2px solid ${c.border}`, color: c.accentText },
+  thAction:     { background: "rgba(0,0,0,0.15)", color: c.textSub, borderLeft: rowBorder },
+  td:           { padding: "8px 10px", textAlign: "center", borderBottom: rowBorder, borderLeft: rowBorder },
+  tdRole:       { padding: "10px 14px", borderBottom: rowBorder, borderRight: `1px solid ${c.border}`, background: "#2f2840", position: "sticky", left: 0, zIndex: 1 },
 
   // Shared card
-  card:         { background: "#fff", border: "1px solid #e5e7eb", borderRadius: 10, overflow: "hidden" },
-  cardHead:     { display: "flex", justifyContent: "space-between", alignItems: "center", padding: "14px 20px", borderBottom: "1px solid #f3f4f6", gap: 12 },
+  card:         common.card,
+  cardHead:     { display: "flex", justifyContent: "space-between", alignItems: "center", padding: "14px 20px", borderBottom: rowBorder, gap: 12, flexWrap: "wrap" },
 
   // Resource
-  resIcon:      { width: 36, height: 36, borderRadius: 8, background: "#ede9fe", color: "#5b21b6", display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 700, fontSize: 15, flexShrink: 0 },
-  resHeading:   { fontWeight: 700, fontSize: 15, color: "#111" },
-  resHint:      { fontSize: 12, color: "#9ca3af", marginTop: 2 },
+  resIcon:      { ...common.icon, width: 36, height: 36, fontSize: 15 },
+  resHeading:   { fontWeight: 700, fontSize: 15, color: c.text },
+  resHint:      { fontSize: 12, color: c.textSub, marginTop: 2 },
 
   // Role
-  roleAvatar:   { width: 34, height: 34, borderRadius: "50%", background: "#e0e7ff", color: "#3730a3", display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 700, fontSize: 14, flexShrink: 0 },
-  roleName:     { fontSize: 14, fontWeight: 600, color: "#111" },
+  roleAvatar:   { width: 34, height: 34, borderRadius: "50%", background: c.accent, color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 700, fontSize: 14, flexShrink: 0 },
+  roleName:     { fontSize: 14, fontWeight: 600, color: c.text },
   roleNameCell: { display: "flex", alignItems: "center", gap: 10 },
   roleRows:     { display: "flex", flexDirection: "column" },
-  roleRow:      { display: "flex", alignItems: "center", justifyContent: "space-between", padding: "10px 20px", gap: 16, borderBottom: "1px solid #f3f4f6" },
+  roleRow:      { display: "flex", alignItems: "center", justifyContent: "space-between", padding: "10px 20px", gap: 16, borderBottom: rowBorder, flexWrap: "wrap" },
   allToggle:    { display: "flex", alignItems: "center", gap: 4, cursor: "pointer", marginLeft: 8 },
-  summaryChip:  { padding: "2px 10px", borderRadius: 20, background: "#e0e7ff", color: "#3730a3", fontSize: 11, fontWeight: 600 },
+  summaryChip:  { padding: "2px 10px", borderRadius: 20, background: c.accentSoft, color: "#c4b0fa", border: `1px solid ${c.accentBorder}`, fontSize: 11, fontWeight: 700 },
 
   // Permission chips
   actionChip:   { padding: "3px 10px", borderRadius: 20, fontSize: 11, fontWeight: 700, letterSpacing: 0.5 },
   checkCell:    { display: "flex", alignItems: "center", cursor: "pointer" },
   matrixCheck:  { display: "inline-flex", alignItems: "center", justifyContent: "center", width: 32, height: 28, borderRadius: 6, fontSize: 13, fontWeight: 700, cursor: "pointer", transition: "all 0.12s", userSelect: "none" },
   permLabel:    { cursor: "pointer" },
-  resNameBadge: { display: "inline-block", padding: "2px 10px", borderRadius: 20, background: "#e0e7ff", color: "#3730a3", fontSize: 11, fontWeight: 700 },
+  resNameBadge: { display: "inline-block", padding: "2px 10px", borderRadius: 20, background: c.accentSoft, color: "#c4b0fa", border: `1px solid ${c.accentBorder}`, fontSize: 11, fontWeight: 700 },
   permChip:     { display: "inline-block", padding: "5px 14px", borderRadius: 20, fontSize: 12, fontWeight: 600, cursor: "pointer", transition: "all 0.12s", userSelect: "none" },
 };

@@ -90,7 +90,8 @@ export function ImportDomainModelModal({ open, onClose, onConfirm }: ImportDomai
         <div className="ldm-body">
           <p style={{ fontSize: 12, color: "var(--color-text-secondary)", marginTop: 0 }}>
             Paste JSON in the same shape as the <strong>Export → Domain model JSON</strong> card
-            (domains, attributes, types, cardinality, and "integral"/"association" relations),
+            (domains, attributes, types, cardinality, "integral"/"association" relations, and inline
+            per-attribute <code>access</code> → <code>rbac</code> / <code>abac</code> rules),
             or upload a <code>.json</code> file. Domain models will be created and shown in the
             Domain Model tab.
           </p>
@@ -137,6 +138,12 @@ export function ImportDomainModelModal({ open, onClose, onConfirm }: ImportDomai
                 <CheckIcon sx={{ fontSize: 15 }} />
                 <span>
                   Parsed <strong>{result.totalDomains}</strong> domain model(s), <strong>{result.totalAttributes}</strong> attribute(s)
+                  {Object.keys(result.domainAccess).length > 0
+                    ? ` — domain-level access on ${Object.keys(result.domainAccess).length} domain(s)`
+                    : ""}
+                  {Object.keys(result.rbacRules).length + Object.keys(result.abacRules).length > 0
+                    ? ` — ${Object.keys(result.rbacRules).length} RBAC + ${Object.keys(result.abacRules).length} ABAC rule(s) attached`
+                    : ""}
                   {result.skippedSynthesized > 0 ? ` — ${result.skippedSynthesized} synthesized reverse attribute(s) skipped (auto-derived)` : ""}.
                 </span>
               </div>

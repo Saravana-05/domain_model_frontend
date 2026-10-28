@@ -1,4 +1,5 @@
 import React, { useState, useMemo, useRef, useEffect } from "react";
+import { useCanDesign } from "../../components/Can";
 import { useAuthStore } from "../../../store/authStore";
 import StorageIcon             from "@mui/icons-material/Storage";
 import LinkOutlinedIcon        from "@mui/icons-material/LinkOutlined";
@@ -12,6 +13,7 @@ import ExpandMoreIcon          from "@mui/icons-material/ExpandMore";
 import ExpandLessIcon          from "@mui/icons-material/ExpandLess";
 import LabelIcon               from "@mui/icons-material/Label";
 import CodeIcon                from "@mui/icons-material/Code";
+import ShieldOutlinedIcon      from "@mui/icons-material/ShieldOutlined";
 import TableChartOutlinedIcon  from "@mui/icons-material/TableChartOutlined";
 import type {
   AllSchemas, ComponentType, DomainViewConfig, NamedValidationRule,
@@ -23,6 +25,8 @@ import type { FieldDraft } from "./fieldDraftTypes";
 import type { QuickCreateField } from "./DomainPickers";
 import { buildDomainModelJson } from "./exportJson";
 import { DomainJsonModal } from "./DomainJsonModal";
+import { DomainPermissionsPanel } from "./DomainPermissionsPanel";
+import type { DomainPermissionRule } from "./DomainPermissionsPanel";
 import { useProjectStore } from "../../store/projectStore";
 
 export interface DomainModelTabProps {
@@ -62,6 +66,20 @@ export interface DomainModelTabProps {
   onRedirectToCreate: (domainName: string, parentDomain?: string, fieldName?: string) => void;
   onGoToCreateDomain: () => void;
   onAddValidationRule?: (tag: string, rule: NamedValidationRule) => void;
+
+  /** domainName -> attribute-based access rules for that domain.
+   *  Optional: if omitted the tab keeps rules in local state (frontend-only). */
+  permissions?:          Record<string, DomainPermissionRule[]>;
+  /** Fires whenever the rules of a domain change in the UI. */
+  onChangePermissions?:  (domainName: string, rules: DomainPermissionRule[]) => void;
+  /** Persist a domain's rules to the backend ("Save permissions" button). */
+  onSavePermissions?:    (domainName: string, rules: DomainPermissionRule[]) => void | Promise<void>;
+  /** Attributes available on the signed-in user (role, department, tenantId …). */
+  userAttributes?:       string[];
+  /** Role names (from the Roles page) offered in the permission rule dropdown. */
+  availableRoles?:       string[];
+  /** Fires when a domain's Permissions panel is opened — load its saved rules here. */
+  onLoadPermissions?:    (domainName: string) => void;
 }
 
 /**
@@ -104,18 +122,24 @@ export function DomainModelTab({
   onAddField, onEditField, onDeleteField, onDeleteDomain, onRenameDomain, onViewConfig, onSaveBackend, onQuickCreateDomain, onRedirectToCreate,
   onGoToCreateDomain,
   onAddValidationRule,
+  permissions, onChangePermissions, onSavePermissions, userAttributes, availableRoles, onLoadPermissions,
 }: DomainModelTabProps) {
   const registry      = schemas._layers?.validationRegistry ?? {};
   const projects      = useProjectStore((s) => s.projects);
   const projectName   = (id: string) => projects.find((p) => p.id === id)?.name ?? `Project ${id}`;
   const modules       = useProjectStore((s) => s.modules);
   const moduleName    = (id: string) => modules.find((m) => m.id === id)?.name ?? `Module ${id}`;
-  // Designing domain models is separate from the per-record permissions
-  // (view/create/edit on a domain's DATA) that hasPermission() checks — a
-  // freshly created domain has no such permission rows, which is what left
-  // every field showing 🔒. Any signed-in user can edit/delete here; swap
-  // this for a hasPermission("domain_model", "edit") check to restrict it.
-  const canManage = useAuthStore((s) => !!s.user);
+  // Designing (edit/delete domains + fields) needs an admin role or the
+  // "domain_model" edit permission — see useCanDesign() in components/Can.tsx.
+  const canManage = useCanDesign();
+  // Deleting a domain model needs an explicit "delete" grant on that domain's
+  // RBAC resource (Access Control matrix). Unlike canManage, this does NOT
+  // auto-pass for admin system roles, so unticking Delete hides the button.
+  const userPerms = useAuthStore((s) => s.user?.permissions);
+  const canDeleteDomain = (domain: string) =>
+    (userPerms ?? []).some(
+      (p) => p.resource.toLowerCase() === domain.toLowerCase() && p.action.toLowerCase() === "delete"
+    );
   const [renaming, setRenaming] = useState<{ domain: string; value: string } | null>(null);
   const [confirmDel, setConfirmDel] = useState<{ domain: string; field?: string } | null>(null);
   const [busy, setBusy] = useState(false);
@@ -123,6 +147,17 @@ export function DomainModelTab({
   const [expandedChildren, setExpandedChildren] = useState<Record<string, boolean>>({});
   const [jsonModalDomain, setJsonModalDomain] = useState<string | null>(null);
   const domainNames   = Object.keys(schemas.domains);
+
+  // Attribute-based permissions. Which domain cards have the panel open, plus a
+  // local fallback store so the UI works before the backend is connected.
+  const [permOpen, setPermOpen]     = useState<Record<string, boolean>>({});
+  const [localPerms, setLocalPerms] = useState<Record<string, DomainPermissionRule[]>>({});
+  const permsFor = (domain: string): DomainPermissionRule[] =>
+    permissions?.[domain] ?? localPerms[domain] ?? [];
+  const setPerms = (domain: string, rules: DomainPermissionRule[]) => {
+    if (onChangePermissions) onChangePermissions(domain, rules);
+    else setLocalPerms((prev) => ({ ...prev, [domain]: rules }));
+  };
 
   // Sidebar tree click → bring that domain's card into view. The list may
   // still be loading when the click happens, so this re-runs as domains arrive.
@@ -159,13 +194,14 @@ export function DomainModelTab({
           No domain models here yet. Use "Create Domain" above, or pick a different project / module from the filter.
         </div>
       )}
-{Object.keys(schemas.domains).map((domainName) => {
+      {Object.keys(schemas.domains).map((domainName) => {
         const fields     = schemas.domains[domainName].fields;
         const fieldNames = Object.keys(fields);
         const viewCfg    = viewConfigs[domainName] ?? {};
-        const isJunction = junctionDomains.has(domainName) && 
-  Object.keys(fields).length === 2 &&
-  Object.keys(fields).every((f) => f.endsWith("Id"));
+        const isJunction = junctionDomains.has(domainName) &&
+          Object.keys(fields).length === 2 &&
+          Object.keys(fields).every((f) => f.endsWith("Id"));
+        const permRuleCount = permsFor(domainName).length;
 
         return (
           <div
@@ -208,7 +244,7 @@ export function DomainModelTab({
               ) : (
                 <span className="si-layer-tag si-layer-tag--domain">Domain Model</span>
               )}
-{dbBackends[domainName] && (
+              {dbBackends[domainName] && (
                 <Badge
                   label={dbBackends[domainName] === "dynamodb" ? "DynamoDB" : "PostgreSQL"}
                   color={dbBackends[domainName] === "dynamodb" ? "orange" : "teal"}
@@ -232,12 +268,24 @@ export function DomainModelTab({
                     <span>Edit</span>
                   </button>
                 )}
-                {canManage && (
+                {canManage && canDeleteDomain(domainName) && (
                   <button className="si-icon-btn si-icon-btn--danger" type="button"
                     title="Delete domain model"
                     onClick={() => setConfirmDel({ domain: domainName })}>
                     <DeleteOutlineIcon sx={{ fontSize: 15 }} />
                     <span>Delete</span>
+                  </button>
+                )}
+                {!isJunction && (
+                  <button className="si-icon-btn" type="button"
+                    title="Attribute-based access rules for this domain"
+                    aria-expanded={!!permOpen[domainName]}
+                    onClick={() => {
+                      if (!permOpen[domainName]) onLoadPermissions?.(domainName);
+                      setPermOpen((prev) => ({ ...prev, [domainName]: !prev[domainName] }));
+                    }}>
+                    <ShieldOutlinedIcon sx={{ fontSize: 15 }} />
+                    <span>Permissions{permRuleCount ? ` (${permRuleCount})` : ""}</span>
                   </button>
                 )}
                 <button className="si-icon-btn si-icon-btn--cloud" type="button"
@@ -253,7 +301,19 @@ export function DomainModelTab({
               </div>
             </div>
 
-           
+            {/* Attribute-based permissions for this domain */}
+            {permOpen[domainName] && !isJunction && (
+              <DomainPermissionsPanel
+                domainName={domainName}
+                fieldNames={fieldNames}
+                rules={permsFor(domainName)}
+                userAttributes={userAttributes}
+                availableRoles={availableRoles}
+                readOnly={!canManage}
+                onChange={(rules) => setPerms(domainName, rules)}
+                onSave={onSavePermissions ? (rules) => onSavePermissions(domainName, rules) : undefined}
+              />
+            )}
 
             <table className="si-table">
               <thead>
@@ -274,8 +334,8 @@ export function DomainModelTab({
                     <React.Fragment key={fieldName}>
                       <tr>
                         <td className="si-field-name">{fieldName}</td>
-                       <td>
-                         {isRelation ? (
+                        <td>
+                          {isRelation ? (
                             <span className="si-relation-cell" style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
                               <Badge label="domain_model 🔗" color="indigo" />
                               <LinkOutlinedIcon sx={{ fontSize: 11 }} />
@@ -285,7 +345,7 @@ export function DomainModelTab({
                             <Badge label={fieldDef.type === "string" ? "text" : fieldDef.type} color="purple" />
                           )}
                         </td>
-                      <td>
+                        <td>
                           <Badge
                             label={(fieldDef as any).cardinality === "list" || (fieldDef as any).cardinality === "many" ? "many" : "one"}
                             color="blue"
@@ -339,25 +399,25 @@ export function DomainModelTab({
                                 Editing field <strong>{fieldName}</strong> in domain <strong>{domainName}</strong>
                               </div>
                               <FieldBuilder
-  key={`${domainName}.${fieldName}`}
-  submitLabel="Save changes"
-  initialName={fieldName}
-  initialDraft={fieldDefToDraft(fieldDef, schemas, fp)}
-  registry={registry}
-  domainNames={domainNames}
-  parentDomainName={domainName}
-  onNewDomainFromRelation={onQuickCreateDomain}
-  onAddValidationRule={onAddValidationRule}
-  onRedirectToCreate={onRedirectToCreate}
-  onCreateRelatedDomain={(fName, draft) => {
-    if (draft.relatedDomain) onRedirectToCreate(draft.relatedDomain, domainName, fName);
-  }}
-  onSubmit={(newName, draft) => {
-    onEditField(domainName, fieldName, newName, draft);
-    setEditing(null);
-  }}
-  onCancel={() => setEditing(null)}
-/>
+                                key={`${domainName}.${fieldName}`}
+                                submitLabel="Save changes"
+                                initialName={fieldName}
+                                initialDraft={fieldDefToDraft(fieldDef, schemas, fp)}
+                                registry={registry}
+                                domainNames={domainNames}
+                                parentDomainName={domainName}
+                                onNewDomainFromRelation={onQuickCreateDomain}
+                                onAddValidationRule={onAddValidationRule}
+                                onRedirectToCreate={onRedirectToCreate}
+                                onCreateRelatedDomain={(fName, draft) => {
+                                  if (draft.relatedDomain) onRedirectToCreate(draft.relatedDomain, domainName, fName);
+                                }}
+                                onSubmit={(newName, draft) => {
+                                  onEditField(domainName, fieldName, newName, draft);
+                                  setEditing(null);
+                                }}
+                                onCancel={() => setEditing(null)}
+                              />
                             </div>
                           </td>
                         </tr>
@@ -367,8 +427,8 @@ export function DomainModelTab({
                 })}
               </tbody>
             </table>
-{/* Child domains — shown nested under parent */}
-           {/* Child domains — nested inside parent card, collapsible */}
+
+            {/* Child domains — nested inside parent card, collapsible */}
             {(childrenMap[domainName] ?? []).length > 0 && (
               <div style={{ borderTop: "0.5px solid var(--color-border-tertiary)", background: "var(--color-background-secondary)", padding: "8px 0 8px 0" }}>
                 {(childrenMap[domainName] ?? []).map((childName) => {
@@ -391,7 +451,7 @@ export function DomainModelTab({
                           {isExpanded ? <ExpandLessIcon sx={{ fontSize: 16 }} /> : <ExpandMoreIcon sx={{ fontSize: 16 }} />}
                         </span>
                       </div>
-                     {isExpanded && (
+                      {isExpanded && (
                         <div style={{ borderTop: "0.5px solid var(--color-border-tertiary)" }}>
                           <table className="si-table">
                             <thead>
@@ -415,18 +475,18 @@ export function DomainModelTab({
                           <div style={{ padding: "0 12px 12px 12px" }}>
                             <AddSection label={`Add field to "${childName}"`}>
                               <FieldBuilder
-  submitLabel={`Add to ${childName}`}
-  registry={registry}
-  domainNames={domainNames}
-  parentDomainName={childName}
-  onNewDomainFromRelation={onQuickCreateDomain}
-  onAddValidationRule={onAddValidationRule}
-  onRedirectToCreate={onRedirectToCreate}
-  onCreateRelatedDomain={(fieldName, draft) => {
-    if (draft.relatedDomain) onRedirectToCreate(draft.relatedDomain, childName, fieldName);
-  }}
-  onSubmit={(fieldName, draft) => onAddField(childName, fieldName, draft)}
-/>
+                                submitLabel={`Add to ${childName}`}
+                                registry={registry}
+                                domainNames={domainNames}
+                                parentDomainName={childName}
+                                onNewDomainFromRelation={onQuickCreateDomain}
+                                onAddValidationRule={onAddValidationRule}
+                                onRedirectToCreate={onRedirectToCreate}
+                                onCreateRelatedDomain={(fieldName, draft) => {
+                                  if (draft.relatedDomain) onRedirectToCreate(draft.relatedDomain, childName, fieldName);
+                                }}
+                                onSubmit={(fieldName, draft) => onAddField(childName, fieldName, draft)}
+                              />
                             </AddSection>
                           </div>
                         </div>
@@ -452,22 +512,22 @@ export function DomainModelTab({
               </div>
             )} */}
 
-{!isJunction && (
+            {!isJunction && (
               <div className="si-card-footer">
                 <AddSection label={`Add field to "${domainName}"`}>
                   <FieldBuilder
-  submitLabel={`Add to ${domainName}`}
-  registry={registry}
-  domainNames={domainNames}
-  parentDomainName={domainName}
-  onNewDomainFromRelation={onQuickCreateDomain}
-  onAddValidationRule={onAddValidationRule}
-  onRedirectToCreate={onRedirectToCreate}
-  onCreateRelatedDomain={(fieldName, draft) => {
-    if (draft.relatedDomain) onRedirectToCreate(draft.relatedDomain, domainName, fieldName);
-  }}
-  onSubmit={(fieldName, draft) => onAddField(domainName, fieldName, draft)}
-/>
+                    submitLabel={`Add to ${domainName}`}
+                    registry={registry}
+                    domainNames={domainNames}
+                    parentDomainName={domainName}
+                    onNewDomainFromRelation={onQuickCreateDomain}
+                    onAddValidationRule={onAddValidationRule}
+                    onRedirectToCreate={onRedirectToCreate}
+                    onCreateRelatedDomain={(fieldName, draft) => {
+                      if (draft.relatedDomain) onRedirectToCreate(draft.relatedDomain, domainName, fieldName);
+                    }}
+                    onSubmit={(fieldName, draft) => onAddField(domainName, fieldName, draft)}
+                  />
                 </AddSection>
               </div>
             )}
@@ -556,7 +616,7 @@ export function fieldDefToDraft(fieldDef: any, schemas: AllSchemas, fullPath: st
     computed:       !!fieldDef.computed,
     datasource:     (fieldDef as any).datasource ?? "",
     relatedDomain,
-        cardinality:    (fieldDef as any).cardinality ?? "",
+    cardinality:    (fieldDef as any).cardinality ?? "",
 
     listDomain:     (fieldDef as any).listDomain     ?? "",
     validationRefs: valRefs,
@@ -565,7 +625,7 @@ export function fieldDefToDraft(fieldDef: any, schemas: AllSchemas, fullPath: st
     relationKind:   (fieldDef as any).relationKind === "integral" ? "integral" : "association",
     exprStr:        comp?.expression ?? "",
     depsStr:        comp?.dependsOn?.join(", ") ?? "",
-component:       (uiHint.component ?? "text") as ComponentType,
+    component:       (uiHint.component ?? "text") as ComponentType,
     labels:          { en: uiHint.label ?? "", ta: "", ar: "" },
     placeholder:     uiHint.placeholder ?? "",
     color:           uiHint.color           ?? "",

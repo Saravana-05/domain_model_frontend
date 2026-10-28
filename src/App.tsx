@@ -2,11 +2,10 @@ import { useState, useRef, Fragment, useEffect } from "react";
 import { SchemaInspector, type SchemaInspectorHandle, type MainTab } from "./core/renderer/SchemaInspector_shim";
 import { allSchemas } from "./schemas";
 import { LoginScreen } from "./screens/LoginScreen";
-import { ResourcesScreen } from "./screens/rbac/ResourcesScreen";
-import { RolesScreen } from "./screens/rbac/RolesScreen";
-import { RolePermissionsScreen } from "./screens/rbac/RolePermissionsScreen";
-import { UserRolesScreen } from "./screens/rbac/UserRolesScreen";
-import { useAuthStore } from "./store/authStore";
+import { RbacScreen } from "./screens/rbac/RbacScreen";
+import { useAuthStore, isAdminRole } from "./store/authStore";
+import { useCanDesign } from "./core/components/Can";
+import { apiFetchMe } from "./core/api/authApi";
 import { useProjectStore } from "./core/store/projectStore";
 import { ProjectsScreen } from "./screens/ProjectsScreen";
 import { SidebarTree } from "../src/core/components/SidebarTree";
@@ -16,13 +15,10 @@ import CodeIcon                from "@mui/icons-material/Code";
 import FilterListIcon          from "@mui/icons-material/FilterList";
 import "./App.css";
 
-type Screen = "projects" | "modules" | "inspector" | "rbac/resources" | "rbac/roles" | "rbac/permissions" | "rbac/users";
+type Screen = "projects" | "modules" | "inspector" | "rbac";
 
 const NAV_ITEMS: { id: Screen; label: string; group?: string }[] = [
-  { id: "rbac/roles",       label: "Roles",             group: "RBAC Admin" },
-  { id: "rbac/resources",   label: "Resources",         group: "RBAC Admin" },
-  { id: "rbac/permissions", label: "Role Permissions",  group: "RBAC Admin" },
-  { id: "rbac/users",       label: "User Roles",        group: "RBAC Admin" },
+  { id: "rbac", label: "Access Control", group: "RBAC Admin" },
 ];
 
 /** Sidebar sub-items nested under the "Domain Model" group — each one is
@@ -34,7 +30,7 @@ const INSPECTOR_TABS: { id: MainTab; label: string }[] = [
   { id: "domain",       label: "Domain Model" },
   // { id: "ui",           label: "UI Config" },
   { id: "validations",  label: "Validations" },
-  { id: "access",       label: "Access Control" },
+  // { id: "access",       label: "Access Control" },
   // { id: "data",         label: "Data" },
   { id: "translations", label: "Translations" },
 ];
@@ -157,11 +153,27 @@ export default function App() {
   const fetchModules        = useProjectStore((s) => s.fetchModules);
 
   const tokenExpired = !!token && isTokenExpired(token);
+  // RBAC admin screens are for admins only (the backend enforces this too).
+  const isAdmin = isAdminRole(user?.role);
+  const canDesign = useCanDesign();
+  const setAuthContext = useAuthStore((s) => s.setAuthContext);
 
   // Clear stale token in an effect — never call setState during render
   useEffect(() => {
     if (tokenExpired) logout();
   }, [tokenExpired]);
+
+  // Re-read roles/permissions from the server once per session start, so a
+  // role change made by an admin shows up without a fresh login.
+  useEffect(() => {
+    if (!token || tokenExpired) return;
+    let cancelled = false;
+    apiFetchMe(token).then((ctx) => {
+      if (!cancelled && ctx) setAuthContext(ctx);
+    });
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [token, tokenExpired]);
 
   // Load the Projects list once on mount so it's ready for the sidebar's
   // active-project highlighting and the Domain Model page's filter.
@@ -262,7 +274,7 @@ export default function App() {
             </button>
           ))}
 
-          {NAV_ITEMS.map((item, i) => {
+          {isAdmin && NAV_ITEMS.map((item, i) => {
             const prevItem = NAV_ITEMS[i - 1];
             const showGroup = item.group && item.group !== prevItem?.group;
             return (
@@ -284,7 +296,9 @@ export default function App() {
             <div style={styles.userAvatar}>{(user.userName?.[0] ?? "?").toUpperCase()}</div>
             <div>
               <div style={styles.userName}>{user.userName}</div>
-              <div style={styles.userRole}>{user.role}</div>
+              <div style={styles.userRole}>
+                {user.roles && user.roles.length > 0 ? user.roles.join(", ") : user.role}
+              </div>
             </div>
           </div>
           <button style={styles.logoutBtn} onClick={logout}>Sign out</button>
@@ -335,6 +349,7 @@ export default function App() {
                     )}
                   </>
                 )}
+                {canDesign && (
                 <button
                   className="page-header-btn page-header-btn--import"
                   type="button"
@@ -343,6 +358,7 @@ export default function App() {
                   <CloudUploadOutlinedIcon sx={{ fontSize: 17 }} />
                   Import JSON
                 </button>
+                )}
                 <button
                   className="page-header-btn page-header-btn--export"
                   type="button"
@@ -366,10 +382,12 @@ export default function App() {
             />
           </>
         )}
-        {screen === "rbac/resources"   && <ResourcesScreen />}
-        {screen === "rbac/roles"       && <RolesScreen />}
-        {screen === "rbac/permissions" && <RolePermissionsScreen />}
-        {screen === "rbac/users"       && <UserRolesScreen />}
+        {screen === "rbac" && !isAdmin && (
+          <div style={{ padding: "48px 32px", color: "#b3abc7", textAlign: "center" }}>
+            🔒 RBAC administration is limited to administrators.
+          </div>
+        )}
+        {isAdmin && screen === "rbac" && <RbacScreen />}
       </main>
     </div>
   );
