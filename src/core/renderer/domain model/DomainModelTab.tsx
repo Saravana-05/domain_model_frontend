@@ -25,7 +25,7 @@ import type { FieldDraft } from "./fieldDraftTypes";
 import type { QuickCreateField } from "./DomainPickers";
 import { buildDomainModelJson } from "./exportJson";
 import { DomainJsonModal } from "./DomainJsonModal";
-import { DomainPermissionsPanel } from "./DomainPermissionsPanel";
+import { DomainPermissionsPanel } from "./Domainpermissionspanel";
 import type { DomainPermissionRule } from "./DomainPermissionsPanel";
 import { useProjectStore } from "../../store/projectStore";
 
