@@ -46,7 +46,7 @@ import { ImportDomainModelModal } from "./ImportDomainModelModal";
 import type { DomainModelImportResult } from "./domainImport";
 import { useProjectStore } from "../../store/projectStore";
 import type { DomainPermissionRule } from "./DomainPermissionsPanel";
-import { apiGetDomainAbac, apiSaveDomainAbac, apiListRoleNames } from "../../api/abacApi";
+import { apiGetDomainAbac, apiSaveDomainAbac, apiListRoleNames } from "../../api/abacapi";
 
 // ════════════════════════════════════════════════════════════════════════════
 // Main export — SchemaInspector
