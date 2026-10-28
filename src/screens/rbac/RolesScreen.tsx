@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
+import type { CSSProperties } from "react";
+import AddIcon from "@mui/icons-material/Add";
 import { apiListRoles, apiCreateRole, apiDeleteRole } from "../../core/api/rbacApi";
-import { SetupGuide } from "./SetupGuide";
+import { c, common } from "./rbacTheme";
 
 interface Role { id: string; name: string; description?: string }
 
@@ -48,24 +50,27 @@ export function RolesScreen() {
 
   const existingNames = new Set(roles.map((r) => r.name.toLowerCase()));
 
-  if (loading) return <div style={s.center}>Loading…</div>;
+  if (loading) return <div style={common.center}>Loading…</div>;
 
   return (
-    <div style={s.page}>
-      <SetupGuide currentStep={1} />
+    <div style={common.page}>
 
-      <h2 style={s.heading}>Roles</h2>
-      <p style={s.sub}>
-        A <strong>Role</strong> is a named group of permissions. Users are assigned roles, not
-        individual permissions directly.
-      </p>
+      <div style={common.header}>
+        <div>
+          <h1 style={common.title}>Roles</h1>
+          <p style={common.subtitle}>
+            A <strong style={{ color: c.text }}>Role</strong> is a named group of permissions. Users are
+            assigned roles, not individual permissions directly.
+          </p>
+        </div>
+      </div>
 
-      {error && <div style={s.error}>{error}</div>}
+      {error && <div style={common.error}>{error}</div>}
 
       {/* Preset role quick-add */}
       {PRESET_ROLES.some((p) => !existingNames.has(p.name.toLowerCase())) && (
         <div style={s.presetBox}>
-          <div style={s.presetLabel}>Quick start — add common roles:</div>
+          <div style={s.presetLabel}>Quick start — add common roles</div>
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
             {PRESET_ROLES.filter((p) => !existingNames.has(p.name.toLowerCase())).map((p) => (
               <button key={p.name} style={s.presetBtn} onClick={() => addRole(p.name, p.description)}>
@@ -79,67 +84,60 @@ export function RolesScreen() {
       {/* Custom role form */}
       <div style={s.addBox}>
         <input
-          style={s.input}
+          style={{ ...common.input, flex: 1, minWidth: 180, width: "auto" }}
           placeholder="Custom role name (e.g. Auditor)"
           value={newName}
           onChange={(e) => setNewName(e.target.value)}
           onKeyDown={(e) => e.key === "Enter" && addRole(newName, newDesc)}
         />
         <input
-          style={s.input}
+          style={{ ...common.input, flex: 1, minWidth: 180, width: "auto" }}
           placeholder="Description (optional)"
           value={newDesc}
           onChange={(e) => setNewDesc(e.target.value)}
         />
-        <button style={s.btn} onClick={() => addRole(newName, newDesc)} disabled={saving || !newName.trim()}>
-          {saving ? "Adding…" : "+ Add Role"}
+        <button
+          className="page-header-btn page-header-btn--import"
+          style={{ opacity: saving || !newName.trim() ? 0.5 : 1 }}
+          onClick={() => addRole(newName, newDesc)}
+          disabled={saving || !newName.trim()}
+        >
+          <AddIcon sx={{ fontSize: 17 }} />
+          {saving ? "Adding…" : "Add Role"}
         </button>
       </div>
 
       {roles.length === 0 && (
-        <div style={s.empty}>No roles yet — use the quick-start buttons above or create a custom one.</div>
+        <div style={common.empty}>No roles yet — use the quick-start buttons above or create a custom one.</div>
       )}
 
       <div style={s.list}>
         {roles.map((r) => (
           <div key={r.id} style={s.card}>
-            <div style={s.rolePill}>{r.name[0].toUpperCase()}</div>
-            <div style={{ flex: 1 }}>
-              <div style={s.roleName}>{r.name}</div>
-              <div style={s.roleDesc}>{r.description ?? "No description"}</div>
+            <div style={common.icon}>{r.name[0].toUpperCase()}</div>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={common.cardTitle}>{r.name}</div>
+              <div style={common.cardDesc}>{r.description ?? "No description"}</div>
             </div>
-            <button style={s.delBtn} onClick={() => removeRole(r.id)}>Delete</button>
+            <button style={common.btnDanger} onClick={() => removeRole(r.id)}>Delete</button>
           </div>
         ))}
       </div>
 
-      {roles.length > 0 && (
-        <div style={s.nextStep}>
+      {/* {roles.length > 0 && (
+        <div style={common.nextStep}>
           Roles ready. <strong>Next → Step 2: Resources</strong> — sync your domain models and define permissions.
         </div>
-      )}
+      )} */}
     </div>
   );
 }
 
-const s: Record<string, React.CSSProperties> = {
-  page:       { padding: "24px 32px", maxWidth: 800, margin: "0 auto" },
-  heading:    { fontSize: 20, fontWeight: 700, margin: "0 0 4px", color: "#111" },
-  sub:        { margin: "0 0 20px", color: "#6b7280", fontSize: 14, lineHeight: 1.5 },
-  center:     { textAlign: "center", padding: 40, color: "#888" },
-  error:      { background: "#fee2e2", color: "#b91c1c", borderRadius: 6, padding: "10px 14px", marginBottom: 16, fontSize: 13 },
-  presetBox:  { background: "#eff6ff", border: "1px solid #bfdbfe", borderRadius: 8, padding: "14px 16px", marginBottom: 16 },
-  presetLabel:{ fontSize: 13, color: "#1e40af", fontWeight: 600, marginBottom: 10 },
-  presetBtn:  { padding: "8px 16px", borderRadius: 8, border: "1.5px solid #4f46e5", background: "#fff", color: "#4f46e5", fontWeight: 600, cursor: "pointer", fontSize: 13 },
-  addBox:     { display: "flex", gap: 10, marginBottom: 20, flexWrap: "wrap" },
-  input:      { flex: 1, minWidth: 160, padding: "9px 12px", borderRadius: 8, border: "1.5px solid #d1d5db", fontSize: 14, outline: "none" },
-  btn:        { padding: "9px 18px", borderRadius: 8, border: "none", background: "#4f46e5", color: "#fff", fontWeight: 600, cursor: "pointer", fontSize: 14 },
-  empty:      { color: "#9ca3af", fontSize: 14, textAlign: "center", padding: 40, background: "#f9fafb", borderRadius: 10, border: "1px dashed #e5e7eb" },
-  list:       { display: "flex", flexDirection: "column", gap: 8 },
-  card:       { display: "flex", alignItems: "center", gap: 14, background: "#fff", border: "1px solid #e5e7eb", borderRadius: 10, padding: "14px 18px" },
-  rolePill:   { width: 36, height: 36, borderRadius: 8, background: "#ede9fe", color: "#5b21b6", display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 700, fontSize: 16, flexShrink: 0 },
-  roleName:   { fontWeight: 600, fontSize: 15, color: "#111" },
-  roleDesc:   { fontSize: 13, color: "#6b7280", marginTop: 2 },
-  delBtn:     { padding: "6px 14px", borderRadius: 6, border: "1px solid #fca5a5", background: "#fff", color: "#dc2626", cursor: "pointer", fontSize: 13 },
-  nextStep:   { marginTop: 20, padding: "12px 16px", background: "#f0fdf4", border: "1px solid #bbf7d0", borderRadius: 8, fontSize: 14, color: "#166534" },
+const s: Record<string, CSSProperties> = {
+  presetBox:   { background: c.accentSoft, border: `1px solid ${c.accentBorder}`, borderRadius: 12, padding: "14px 16px", marginBottom: 16 },
+  presetLabel: { fontSize: 12, color: c.accentText, fontWeight: 700, marginBottom: 10, textTransform: "uppercase", letterSpacing: 0.8 },
+  presetBtn:   { padding: "7px 14px", borderRadius: 8, border: `1px solid ${c.accentBorder}`, background: "rgba(139,92,246,0.14)", color: "#c4b0fa", fontWeight: 600, cursor: "pointer", fontSize: 13, fontFamily: "inherit" },
+  addBox:      { display: "flex", gap: 10, marginBottom: 20, flexWrap: "wrap", alignItems: "center" },
+  list:        { display: "flex", flexDirection: "column", gap: 10 },
+  card:        { ...common.card, display: "flex", alignItems: "center", gap: 14, padding: "14px 18px" },
 };

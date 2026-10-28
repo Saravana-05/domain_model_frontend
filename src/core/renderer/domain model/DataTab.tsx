@@ -1,5 +1,6 @@
 import React, { useState } from "react";
-import { useAuthStore } from "../../../store/authStore";
+import { usePermission } from "../../components/Can";
+import { isPermissionError } from "../../api/permissionError";
 import AddIcon                   from "@mui/icons-material/Add";
 import StorageIcon               from "@mui/icons-material/Storage";
 import SaveOutlinedIcon          from "@mui/icons-material/SaveOutlined";
@@ -11,7 +12,6 @@ import { Badge } from "./helpers";
 
 export function DataTab({ schemas, dbBackends = {} }: { schemas: AllSchemas; dbBackends?: Record<string, string> }) {
   const domainNames    = Object.keys(schemas.domains);
-  const hasPermission  = useAuthStore((s) => s.hasPermission);
   const [selectedDomain, setSelectedDomain] = useState(domainNames[0] ?? "");
   const [formValues,     setFormValues]     = useState<Record<string, string>>({});
   const [rows,           setRows]           = useState<Record<string, any>[] | null>(null);
@@ -21,8 +21,10 @@ export function DataTab({ schemas, dbBackends = {} }: { schemas: AllSchemas; dbB
   const activeBackend = dbBackends[selectedDomain] ?? "postgresql";
   const dbLabel = activeBackend === "dynamodb" ? "DynamoDB" : "PostgreSQL";
 
-  const canCreate = !selectedDomain || hasPermission(selectedDomain, "create");
-  const canView   = !selectedDomain || hasPermission(selectedDomain, "view");
+  const canCreateDomain = usePermission(selectedDomain, "create");
+  const canViewDomain   = usePermission(selectedDomain, "view");
+  const canCreate = !selectedDomain || canCreateDomain;
+  const canView   = !selectedDomain || canViewDomain;
 
   const domainFields = selectedDomain ? Object.entries(schemas.domains[selectedDomain]?.fields ?? {}) : [];
 
@@ -55,7 +57,10 @@ export function DataTab({ schemas, dbBackends = {} }: { schemas: AllSchemas; dbB
         setStatus({ state: "err", msg: `❌ Insert failed: ${res.message}` });
       }
     } catch (err: any) {
-      setStatus({ state: "err", msg: `❌ Error: ${err?.message ?? String(err)}` });
+      setStatus({
+        state: "err",
+        msg: isPermissionError(err) ? `🔒 ${err.message}` : `❌ Error: ${err?.message ?? String(err)}`,
+      });
     }
   }
 
@@ -66,7 +71,10 @@ export function DataTab({ schemas, dbBackends = {} }: { schemas: AllSchemas; dbB
       const res = await apiListRows(selectedDomain);
       if (res.status === "success") setRows(res.data ?? []);
       else setRows([]);
-    } catch { setRows([]); }
+    } catch (err) {
+      setRows([]);
+      if (isPermissionError(err)) setStatus({ state: "err", msg: `🔒 ${err.message}` });
+    }
     finally { setLoadingRows(false); }
   }
 

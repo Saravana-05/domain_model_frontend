@@ -7,6 +7,7 @@
 
 import { useAuthStore } from "../../store/authStore";
 import { useProjectStore } from "../store/projectStore";
+import { PermissionError, extractDetail } from "./permissionError";
 
 const API_BASE = import.meta.env.VITE_API_URL || "https://ab2dgab6euwc4d2f3dkgddmxiu0mmuxx.lambda-url.ap-south-1.on.aws";
 
@@ -239,22 +240,15 @@ export function domainToBackendRequest(params: {
     // reassignable references (doctor/patient belongs to branch).
     if (fieldDef.relationKind) field.relationKind = fieldDef.relationKind;
 
-    // relatedDomain was missing from this same whitelist — relationKind
-    // ("association"/"integral") was being saved, but the actual target
-    // domain it points to was silently dropped on every save. That's why
-    // a freshly-created or freshly-re-saved relation field could show
-    // relationKind with an empty related_domain_model.linked_with on
-    // export: the backend genuinely never received the value to store.
-    // This is the save-side counterpart to the same gap already fixed in
-    // backendSchemaToFrontend() (the load side).
+    // relatedDomain: the actual target domain a relation points to. Without
+    // this, relationKind was saved but the target was silently dropped.
+    // This is the save-side counterpart to backendSchemaToFrontend().
     if (fieldDef.relatedDomain) field.relatedDomain = fieldDef.relatedDomain;
 
     // Resolve registry-attached rules (validationRefs) into real, flat
-    // rules the Form plugin can run — this was the actual gap: only
-    // fieldDef.validations (inline, one-off rules typed directly on the
-    // field) ever made it into the payload before. Clicking a Registry
-    // Rules chip attached a TAG to validationRefs, but that tag was never
-    // looked up or resolved here, so it silently vanished on save.
+    // rules the Form plugin can run. Inline validations alone were not
+    // enough: a tag attached via the Registry Rules chips has to be looked
+    // up and resolved here, or it silently vanishes on save.
     const refRules: FlatValidationRule[] = Array.isArray(fieldDef.validationRefs)
       ? fieldDef.validationRefs.flatMap((tag: string) => {
           const rule = registry[tag];
@@ -271,12 +265,8 @@ export function domainToBackendRequest(params: {
 
     // Also persist the raw tag list itself (not just the rules resolved
     // from it above) — backendSchemaToFrontend() reads validationRefs
-    // back on load to show the actual tag identity (e.g. "required-name")
-    // in the Validation Refs column and the Export tab's JSON. Without
-    // sending it here too, that identity is only ever present for fields
-    // saved before this fix; any field saved through this function keeps
-    // its enforced rules (field.validations still runs fine) but loses
-    // which named tag it came from on the next reload.
+    // back on load to show the tag identity (e.g. "required-name") in the
+    // Validation Refs column and the Export tab's JSON.
     if (Array.isArray(fieldDef.validationRefs) && fieldDef.validationRefs.length > 0) {
       field.validationRefs = fieldDef.validationRefs;
     }
@@ -325,16 +315,9 @@ export function backendSchemaToFrontend(entry: BackendSchemaEntry): {
       datasource:     field.datasource,
       cardinality:    field.cardinality ?? undefined,
       relationKind:   field.relationKind ?? undefined,
-      // These two were missing entirely — the raw backend field object
-      // already carries them (see the /datastore/schemas response: each
-      // field has "relatedDomain": "contact" etc. right alongside
-      // relationKind), but this function silently dropped them on the
-      // way into the frontend's field shape. That's why every relation
-      // came back empty on reload/import even though the backend had it
-      // stored correctly all along — downstream code (handleLoadFromBackend
-      // in SchemaInspector.tsx) reads relatedDomain/validationRefs off of
-      // exactly this returned object, so if they're missing here, no
-      // amount of "whitelisting" further downstream can recover them.
+      // The raw backend field already carries relatedDomain/validationRefs;
+      // downstream code (handleLoadFromBackend in SchemaInspector.tsx) reads
+      // them off this returned object, so they must be passed through here.
       relatedDomain:  field.relatedDomain ?? undefined,
       validationRefs: field.validationRefs ?? undefined,
     };
@@ -430,17 +413,35 @@ export interface BackendValidationRulesListResponse {
 // API functions
 // ════════════════════════════════════════════════════════════════════════════
 
-async function apiFetch(path: string, init?: RequestInit): Promise<any> {
+/**
+ * Shared authenticated fetch. EXPORTED so other API modules (e.g.
+ * abacApi.ts, rbac APIs) can reuse the exact same auth handling instead
+ * of rolling their own raw fetch — a raw fetch without the Authorization
+ * header is what produces FastAPI's plain "Not authenticated" response.
+ *
+ *  - Sends `Authorization: Bearer <token>` when a token is available.
+ *  - 401 → logs the user out (session is gone/invalid).
+ *  - 403 → throws PermissionError with the backend's `detail` text.
+ *  - Any other failure → throws Error("API <status>: <body>").
+ */
+export async function apiFetch(path: string, init?: RequestInit): Promise<any> {
   const token = resolveToken();
   const headers: Record<string, string> = { "Content-Type": "application/json" };
   if (token) headers["Authorization"] = `Bearer ${token}`;
 
-  const res = await fetch(`${API_BASE}${path}`, { headers, ...init });
+  // Merge caller-supplied headers ON TOP of the defaults instead of letting
+  // `...init` replace the whole headers object (which would silently drop
+  // the Authorization header whenever a caller passes any headers at all).
+  const res = await fetch(`${API_BASE}${path}`, {
+    ...init,
+    headers: { ...headers, ...((init?.headers as Record<string, string> | undefined) ?? {}) },
+  });
   if (!res.ok) {
     if (res.status === 401) {
       useAuthStore.getState().logout();
     }
     const text = await res.text().catch(() => res.statusText);
+    if (res.status === 403) throw new PermissionError(extractDetail(text) || "Permission denied");
     throw new Error(`API ${res.status}: ${text}`);
   }
   return res.json();
@@ -474,10 +475,9 @@ function resolveScope(
  *
  * If `req.project_id` isn't explicitly set, this scopes the new domain
  * model to whichever project is currently selected (ProjectSelector.tsx)
- * — every one of SchemaInspector.tsx's ~10 create-domain call sites gets
- * project scoping "for free" this way, without each needing to be
- * touched individually. Pass `project_id: null` explicitly to force
- * "no project" regardless of what's currently selected.
+ * — every create-domain call site in SchemaInspector.tsx gets project
+ * scoping "for free" this way. Pass `project_id: null` explicitly to
+ * force "no project" regardless of what's currently selected.
  */
 export async function apiCreateDomain(req: BackendCreateRequest): Promise<BackendCreateResponse> {
   const { project_id, module_id } = resolveScope(req.project_id, req.module_id);
@@ -704,9 +704,10 @@ export async function apiSaveValidationRule(
   });
 }
 
+/** DELETE /datastore/validation-rules/{tag} — now goes through apiFetch so it
+ *  sends the Authorization header (the old raw fetch did not). */
 export async function apiDeleteValidationRule(tag: string): Promise<{ status: string; message?: string }> {
-  const res = await fetch(`${API_BASE}/datastore/validation-rules/${encodeURIComponent(tag)}`, {
+  return apiFetch(`/datastore/validation-rules/${encodeURIComponent(tag)}`, {
     method: "DELETE",
   });
-  return res.json();
 }

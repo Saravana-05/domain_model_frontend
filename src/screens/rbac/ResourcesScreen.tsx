@@ -7,7 +7,8 @@ import {
   apiDeletePermission,
 } from "../../core/api/rbacApi";
 import { apiListSchemas } from "../../core/api/datastoreApi";
-import { SetupGuide } from "./SetupGuide";
+import type { CSSProperties } from "react";
+import { c, common, checkboxAccent } from "./rbacTheme";
 
 const DEFAULT_ACTIONS = ["create", "view", "edit", "delete"];
 
@@ -123,7 +124,7 @@ export function ResourcesScreen() {
     catch (e: any) { setError(e.message); }
   }
 
-  if (loading) return <div style={s.center}>Loading…</div>;
+  if (loading) return <div style={common.center}>Loading…</div>;
 
   // ── Build lookup: domain name → RBAC resource ──────────────────────────────
   const domainResourceMap = new Map<string, Resource>();
@@ -145,25 +146,24 @@ export function ResourcesScreen() {
   const unsyncedCount = allDomainNames.filter((d) => !domainResourceMap.has(d)).length;
 
   return (
-    <div style={s.page}>
-      <SetupGuide currentStep={2} />
+    <div style={common.page}>
 
-      <div style={s.headerRow}>
+      <div style={common.header}>
         <div>
-          <h2 style={s.heading}>Resources & Permissions</h2>
-          <p style={s.sub}>
-            Each <strong>schema</strong> becomes a protected resource. Tick which actions are
+          <h1 style={common.title}>Resources & Permissions</h1>
+          <p style={common.subtitle}>
+            Each <strong style={{ color: c.text }}>schema</strong> becomes a protected resource. Tick which actions are
             allowed — these become assignable permissions for roles.
           </p>
         </div>
         {unsyncedCount > 0 && (
-          <button style={s.syncAllBtn} onClick={syncAll} disabled={syncing !== null}>
+          <button className="page-header-btn page-header-btn--import" style={{ opacity: syncing !== null ? 0.6 : 1 }} onClick={syncAll} disabled={syncing !== null}>
             {syncing ? "Syncing…" : `⚡ Sync All (${unsyncedCount} pending)`}
           </button>
         )}
       </div>
 
-      {error && <div style={s.error}>{error}</div>}
+      {error && <div style={common.error}>{error}</div>}
 
       {/* ── Schema cards (backend datastore + frontend domains, merged) ─────── */}
       <div style={s.sectionLabel}>
@@ -172,7 +172,7 @@ export function ResourcesScreen() {
       </div>
       <div style={s.list}>
         {allDomainNames.length === 0 && (
-          <div style={s.empty}>No schemas found in the datastore.</div>
+          <div style={common.empty}>No schemas found in the datastore.</div>
         )}
 
         {allDomainNames.map((domainName) => {
@@ -186,8 +186,8 @@ export function ResourcesScreen() {
                 <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
                   <div style={{
                     ...s.icon,
-                    background: isSynced ? "#ede9fe" : "#f3f4f6",
-                    color: isSynced ? "#5b21b6" : "#9ca3af",
+                    background: isSynced ? c.accentSoft : c.neutral.bg,
+                    color: isSynced ? c.accentText : c.textMuted,
                   }}>
                     {domainName[0].toUpperCase()}
                   </div>
@@ -210,7 +210,7 @@ export function ResourcesScreen() {
                 <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
                   {!isSynced && (
                     <button
-                      style={s.syncBtn}
+                      className="page-header-btn page-header-btn--import" style={{ padding: "7px 16px" }}
                       onClick={() => syncDomain(domainName)}
                       disabled={isSyncing}
                     >
@@ -220,7 +220,7 @@ export function ResourcesScreen() {
                   {isSynced && (
                     <>
                       <button
-                        style={s.iconBtn}
+                        style={common.btnGhost}
                         onClick={() =>
                           setExpanded(expanded === resource!.id ? null : resource!.id)
                         }
@@ -228,7 +228,7 @@ export function ResourcesScreen() {
                         {expanded === resource!.id ? "▲ Hide" : "▼ Edit Permissions"}
                       </button>
                       <button
-                        style={s.deleteBtn}
+                        style={common.btnDanger}
                         onClick={() => removeResource(resource!.id)}
                       >
                         Remove
@@ -263,6 +263,7 @@ export function ResourcesScreen() {
                         <label key={action} style={s.checkLabel}>
                           <input
                             type="checkbox"
+                            style={checkboxAccent}
                             checked={has}
                             disabled={toggling}
                             onChange={() => togglePermission(resource!, action)}
@@ -305,12 +306,12 @@ export function ResourcesScreen() {
                   </div>
                   <div style={{ display: "flex", gap: 8 }}>
                     <button
-                      style={s.iconBtn}
+                      style={common.btnGhost}
                       onClick={() => setExpanded(expanded === r.id ? null : r.id)}
                     >
                       {expanded === r.id ? "▲ Hide" : "▼ Edit Permissions"}
                     </button>
-                    <button style={s.deleteBtn} onClick={() => removeResource(r.id)}>
+                    <button style={common.btnDanger} onClick={() => removeResource(r.id)}>
                       Delete
                     </button>
                   </div>
@@ -335,6 +336,7 @@ export function ResourcesScreen() {
                           <label key={action} style={s.checkLabel}>
                             <input
                               type="checkbox"
+                              style={checkboxAccent}
                               checked={has}
                               disabled={toggling}
                               onChange={() => togglePermission(r, action)}
@@ -357,7 +359,7 @@ export function ResourcesScreen() {
       )}
 
       {allSynced && allDomainNames.length > 0 && (
-        <div style={s.nextStep}>
+        <div style={common.nextStep}>
           All schemas synced. <strong>Next → Step 3: Role Permissions</strong> — assign what each role can do.
         </div>
       )}
@@ -393,30 +395,30 @@ function AddCustomResource({ onAdded }: { onAdded: () => void }) {
   return (
     <div style={{ marginTop: 20 }}>
       {!open ? (
-        <button style={s.addCustomBtn} onClick={() => setOpen(true)}>
+        <button style={common.btnDashed} onClick={() => setOpen(true)}>
           + Add custom resource
         </button>
       ) : (
         <div style={s.addBox}>
-          {error && <div style={{ ...s.error, marginBottom: 8 }}>{error}</div>}
+          {error && <div style={{ ...common.error, marginBottom: 8 }}>{error}</div>}
           <input
-            style={s.input}
+            style={common.input}
             placeholder="Resource name (e.g. Invoice)"
             value={name}
             onChange={(e) => setName(e.target.value)}
           />
           <input
-            style={s.input}
+            style={common.input}
             placeholder="Description (optional)"
             value={desc}
             onChange={(e) => setDesc(e.target.value)}
           />
           <div style={{ display: "flex", gap: 8 }}>
-            <button style={s.btn} onClick={save} disabled={saving || !name.trim()}>
+            <button className="page-header-btn page-header-btn--import" style={{ opacity: saving || !name.trim() ? 0.5 : 1 }} onClick={save} disabled={saving || !name.trim()}>
               {saving ? "Saving…" : "Add"}
             </button>
             <button
-              style={s.cancelBtn}
+              style={common.btnGhost}
               onClick={() => { setOpen(false); setName(""); setDesc(""); }}
             >
               Cancel
@@ -429,44 +431,28 @@ function AddCustomResource({ onAdded }: { onAdded: () => void }) {
 }
 
 // ── Styles ─────────────────────────────────────────────────────────────────────
-const s: Record<string, React.CSSProperties> = {
-  page:           { padding: "24px 32px", maxWidth: 860, margin: "0 auto" },
-  headerRow:      { display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 20, gap: 16 },
-  heading:        { fontSize: 20, fontWeight: 700, margin: "0 0 4px", color: "#111" },
-  sub:            { margin: 0, color: "#6b7280", fontSize: 14, lineHeight: 1.5 },
-  syncAllBtn:     { padding: "10px 18px", borderRadius: 8, border: "none", background: "#4f46e5", color: "#fff", fontWeight: 600, cursor: "pointer", fontSize: 14, whiteSpace: "nowrap" },
-  center:         { textAlign: "center", padding: 40, color: "#888" },
-  error:          { background: "#fee2e2", color: "#b91c1c", borderRadius: 6, padding: "10px 14px", fontSize: 13 },
-  sectionLabel:   { fontSize: 11, fontWeight: 700, color: "#9ca3af", textTransform: "uppercase", letterSpacing: 1, marginBottom: 10 },
-  sectionHint:    { fontWeight: 400, textTransform: "none", letterSpacing: 0, fontSize: 11 },
+const s: Record<string, CSSProperties> = {
+  sectionLabel:   common.sectionLabel,
+  sectionHint:    { fontWeight: 400, textTransform: "none", letterSpacing: 0, fontSize: 11, color: c.textMuted },
   list:           { display: "flex", flexDirection: "column", gap: 10 },
-  empty:          { color: "#9ca3af", fontSize: 14, textAlign: "center", padding: 24 },
-  card:           { background: "#fff", border: "1px solid #e5e7eb", borderRadius: 10, overflow: "hidden" },
-  cardUnsynced:   { border: "1.5px dashed #d1d5db", background: "#fafafa" },
-  cardHeader:     { display: "flex", justifyContent: "space-between", alignItems: "center", padding: "14px 18px" },
-  icon:           { width: 38, height: 38, borderRadius: 8, display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 700, fontSize: 16, flexShrink: 0, background: "#ede9fe", color: "#5b21b6" },
-  resourceName:   { fontWeight: 600, fontSize: 15, color: "#111", display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" },
-  resourceDesc:   { color: "#6b7280", fontSize: 13, marginTop: 3 },
-  badge:          { fontSize: 11, fontWeight: 600, padding: "2px 8px", borderRadius: 20 },
-  badgeSynced:    { background: "#dcfce7", color: "#166534" },
-  badgeUnsynced:  { background: "#f3f4f6", color: "#9ca3af" },
-  syncBtn:        { padding: "8px 16px", borderRadius: 8, border: "none", background: "#4f46e5", color: "#fff", fontWeight: 600, cursor: "pointer", fontSize: 13 },
-  iconBtn:        { padding: "6px 12px", borderRadius: 6, border: "1px solid #e5e7eb", background: "#fff", cursor: "pointer", fontSize: 13, color: "#374151" },
-  deleteBtn:      { padding: "6px 12px", borderRadius: 6, border: "1px solid #fca5a5", background: "#fff", cursor: "pointer", fontSize: 13, color: "#dc2626" },
-  permSummary:    { display: "flex", gap: 8, padding: "8px 18px 12px 18px", flexWrap: "wrap" },
-  chip:           { padding: "3px 12px", borderRadius: 20, fontSize: 12, fontWeight: 500 },
-  chipOn:         { background: "#dcfce7", color: "#166534" },
-  chipOff:        { background: "#f3f4f6", color: "#9ca3af" },
-  permEditor:     { padding: "12px 18px 16px", background: "#f9fafb", borderTop: "1px solid #e5e7eb" },
-  permEditorLabel:{ fontSize: 12, color: "#9ca3af", marginBottom: 10 },
+  card:           common.card,
+  cardUnsynced:   { border: "1.5px dashed rgba(255,255,255,0.18)", background: "rgba(51,44,66,0.55)" },
+  cardHeader:     { display: "flex", justifyContent: "space-between", alignItems: "center", padding: "14px 18px", gap: 12, flexWrap: "wrap" },
+  icon:           common.icon,
+  resourceName:   { fontWeight: 700, fontSize: 15, color: c.text, display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" },
+  resourceDesc:   { color: c.textSub, fontSize: 12, marginTop: 3 },
+  badge:          { fontSize: 11, fontWeight: 700, padding: "2px 9px", borderRadius: 20, border: "1px solid transparent" },
+  badgeSynced:    { background: c.green.bg, color: c.green.text, borderColor: c.green.border },
+  badgeUnsynced:  { background: c.neutral.bg, color: c.neutral.text, borderColor: c.neutral.border },
+  permSummary:    { display: "flex", gap: 8, padding: "0 18px 14px 18px", flexWrap: "wrap" },
+  chip:           { padding: "3px 12px", borderRadius: 20, fontSize: 12, fontWeight: 600, border: "1px solid transparent" },
+  chipOn:         { background: c.green.bg, color: c.green.text, borderColor: c.green.border },
+  chipOff:        { background: c.neutral.bg, color: c.neutral.text, borderColor: c.neutral.border },
+  permEditor:     { padding: "12px 18px 16px", background: "rgba(0,0,0,0.18)", borderTop: `1px solid ${c.border}` },
+  permEditorLabel:{ fontSize: 12, color: c.textMuted, marginBottom: 10 },
   checkLabel:     { display: "inline-flex", alignItems: "center", gap: 6, cursor: "pointer" },
-  permTag:        { padding: "5px 14px", borderRadius: 20, fontSize: 13, fontWeight: 500 },
-  permTagOn:      { background: "#dcfce7", color: "#166534" },
-  permTagOff:     { background: "#f3f4f6", color: "#6b7280" },
-  addCustomBtn:   { padding: "8px 16px", borderRadius: 8, border: "1.5px dashed #d1d5db", background: "#fff", color: "#6b7280", cursor: "pointer", fontSize: 13, fontWeight: 500 },
-  addBox:         { background: "#fff", border: "1px solid #e5e7eb", borderRadius: 10, padding: "16px 18px", display: "flex", flexDirection: "column", gap: 10 },
-  input:          { padding: "9px 12px", borderRadius: 8, border: "1.5px solid #d1d5db", fontSize: 14, outline: "none" },
-  btn:            { padding: "9px 20px", borderRadius: 8, border: "none", background: "#4f46e5", color: "#fff", fontWeight: 600, cursor: "pointer", fontSize: 14 },
-  cancelBtn:      { padding: "9px 16px", borderRadius: 8, border: "1px solid #e5e7eb", background: "#fff", color: "#374151", cursor: "pointer", fontSize: 14 },
-  nextStep:       { marginTop: 24, padding: "12px 16px", background: "#f0fdf4", border: "1px solid #bbf7d0", borderRadius: 8, fontSize: 14, color: "#166534" },
+  permTag:        { padding: "5px 14px", borderRadius: 20, fontSize: 13, fontWeight: 600, border: "1px solid transparent" },
+  permTagOn:      { background: c.green.bg, color: c.green.text, borderColor: c.green.border },
+  permTagOff:     { background: c.neutral.bg, color: c.neutral.text, borderColor: c.neutral.border },
+  addBox:         { ...common.card, padding: "16px 18px", display: "flex", flexDirection: "column", gap: 10 },
 };

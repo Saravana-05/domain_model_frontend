@@ -4,6 +4,7 @@ import FolderOutlinedIcon  from "@mui/icons-material/FolderOutlined";
 import ArrowForwardIcon    from "@mui/icons-material/ArrowForward";
 import { useProjectStore } from "../core/store/projectStore";
 import { CreateEntityModal } from "../core/components/CreateEntityModal";
+import { DesignerOnly } from "../core/components/Can";
 
 interface ProjectsScreenProps {
   /** Fires when the user clicks a project card (or just finished creating
@@ -47,14 +48,16 @@ export function ProjectsScreen({ onOpenProject }: ProjectsScreenProps) {
             Group your domain models by project. Open a project to build domain models inside it.
           </p>
         </div>
-        <button
-          type="button"
-          className="page-header-btn page-header-btn--import"
-          onClick={() => setShowCreate(true)}
-        >
-          <AddIcon sx={{ fontSize: 17 }} />
-          Create Project
-        </button>
+        <DesignerOnly>
+          <button
+            type="button"
+            className="page-header-btn page-header-btn--import"
+            onClick={() => setShowCreate(true)}
+          >
+            <AddIcon sx={{ fontSize: 17 }} />
+            Create Project
+          </button>
+        </DesignerOnly>
       </div>
 
       {showCreate && (

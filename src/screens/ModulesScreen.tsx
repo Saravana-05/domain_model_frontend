@@ -10,6 +10,7 @@ import {
   type BackendModule,
 } from "../core/api/moduleApi";
 import { CreateEntityModal } from "../core/components/CreateEntityModal";
+import { DesignerOnly } from "../core/components/Can";
 
 interface ModulesScreenProps {
   /** Fires when the user clicks a module card (or just finished creating
@@ -120,16 +121,18 @@ export function ModulesScreen({ onOpenModule, initialProjectId = null, openCreat
               <option key={p.id} value={p.id}>{p.name}</option>
             ))}
           </select>
-          <button
-            type="button"
-            className="page-header-btn page-header-btn--import"
-            disabled={projects.length === 0}
-            title={projects.length === 0 ? "Create a project first" : undefined}
-            onClick={startCreate}
-          >
-            <AddIcon sx={{ fontSize: 17 }} />
-            Create Module
-          </button>
+          <DesignerOnly>
+            <button
+              type="button"
+              className="page-header-btn page-header-btn--import"
+              disabled={projects.length === 0}
+              title={projects.length === 0 ? "Create a project first" : undefined}
+              onClick={startCreate}
+            >
+              <AddIcon sx={{ fontSize: 17 }} />
+              Create Module
+            </button>
+          </DesignerOnly>
         </div>
       </div>
 

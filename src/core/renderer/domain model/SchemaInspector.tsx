@@ -38,12 +38,15 @@ import { CreateDomainTab, type CreateDomainPayload } from "./CreateDomainTab";
 import { DataTab } from "./DataTab";
 import { TranslationsTab } from "./TranslationsTab";
 import { ExportJsonTab } from "./ExportJsonTab";
+import { applyDomainAccess } from "./accessLoader";
 import type { FieldDraft } from "./fieldDraftTypes";
 import type { QuickCreateField } from "./DomainPickers";
 import { draftToDomainFieldCore, draftToUIHint, draftToABACRule, draftToRBACRule } from "./draftConverters";
 import { ImportDomainModelModal } from "./ImportDomainModelModal";
 import type { DomainModelImportResult } from "./domainImport";
 import { useProjectStore } from "../../store/projectStore";
+import type { DomainPermissionRule } from "./DomainPermissionsPanel";
+import { apiGetDomainAbac, apiSaveDomainAbac, apiListRoleNames } from "../../api/abacApi";
 
 // ════════════════════════════════════════════════════════════════════════════
 // Main export — SchemaInspector
@@ -92,6 +95,14 @@ export const SchemaInspector = forwardRef<SchemaInspectorHandle, SchemaInspector
   const currentProjectId = useProjectStore((s) => s.currentProjectId);
   const currentModuleId  = useProjectStore((s) => s.currentModuleId);
 
+  // Role names shown in the "Who can access (roles)" dropdown of each
+  // domain's Permissions panel. TEMPORARY list — replace with the real
+  // roles from the RBAC Admin → Roles page (see the TODO effect below).
+  const [availableRoles, setAvailableRoles] = useState<string[]>([]);
+  // domainName -> saved access rules (loaded from the backend when a card's Permissions panel opens).
+  const [permissions, setPermissions] = useState<Record<string, DomainPermissionRule[]>>({});
+  const loadedPermDomains = useRef<Set<string>>(new Set());
+
   useImperativeHandle(ref, () => ({
     openImportModal: () => setShowImportModal(true),
     loadFromBackend: () => handleLoadFromBackend(),
@@ -111,6 +122,43 @@ export const SchemaInspector = forwardRef<SchemaInspectorHandle, SchemaInspector
     onTabChange?.(tab);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tab]);
+
+  // Real role names from the RBAC Roles page (GET /rbac/roles — admin only).
+  useEffect(() => {
+    apiListRoleNames()
+      .then(setAvailableRoles)
+      .catch((err) => console.warn("Could not load roles:", err?.message));
+  }, []);
+
+  // Load a domain's saved ABAC rules the first time its Permissions panel opens.
+  async function handleLoadPermissions(domainName: string) {
+    if (loadedPermDomains.current.has(domainName)) return;
+    try {
+      const rules = await apiGetDomainAbac(domainName);
+      loadedPermDomains.current.add(domainName);
+      setPermissions((prev) => ({ ...prev, [domainName]: rules }));
+    } catch (err: any) {
+      flash(`⚠️ Could not load permissions for "${domainName}": ${err?.message ?? String(err)}`, 6000);
+    }
+  }
+
+  function handleChangePermissions(domainName: string, rules: DomainPermissionRule[]) {
+    setPermissions((prev) => ({ ...prev, [domainName]: rules }));
+  }
+
+  async function handleSavePermissions(domainName: string, rules: DomainPermissionRule[]) {
+    try {
+      const saved = await apiSaveDomainAbac(domainName, rules, {
+        projectId: extra.projectIds[domainName] ?? currentProjectId,
+        moduleId:  extra.moduleIds[domainName]  ?? currentModuleId,
+      });
+      loadedPermDomains.current.add(domainName);
+      setPermissions((prev) => ({ ...prev, [domainName]: saved }));
+      flash(`✅ Permissions saved for "${domainName}" (${saved.length} rule${saved.length === 1 ? "" : "s"}).`);
+    } catch (err: any) {
+      flash(`❌ Could not save permissions for "${domainName}": ${err?.message ?? String(err)}`, 6000);
+    }
+  }
 
   const [pendingDomainName, setPendingDomainName] = useState<string | null>(null);
   const [pendingParentDomain, setPendingParentDomain] = useState<string | null>(null);
@@ -409,6 +457,9 @@ async function handleQuickCreateDomain(name: string, fields: QuickCreateField[])
         ...prev,
         extraFields: nextExtraFields,
         dbBackends: nextDbBackends,
+        // Inline `access.rbac` / `access.abac` from the imported JSON.
+        rbacRules:  { ...prev.rbacRules, ...result.rbacRules },
+        abacRules:  { ...prev.abacRules, ...result.abacRules },
         projectIds: currentProjectId
           ? { ...prev.projectIds, ...Object.fromEntries(importedNames.map((n) => [n, currentProjectId])) }
           : prev.projectIds,
@@ -445,8 +496,8 @@ async function handleQuickCreateDomain(name: string, fields: QuickCreateField[])
           domainName: domain.name,
           fields:     backendFields as any,
           uiHints:    {},
-          rbacRules:  {},
-          abacRules:  {},
+          rbacRules:  result.rbacRules,
+          abacRules:  result.abacRules,
           db_backend: "postgresql",
         });
         const res = await apiCreateDomain(req);
@@ -459,10 +510,21 @@ async function handleQuickCreateDomain(name: string, fields: QuickCreateField[])
     for (const { a, b } of result.associations) {
       await ensureJunctionDomain(a, b, "postgresql");
     }
+    // Domain-level access (`access.rbac` role → actions, `access.abac` rules).
+    let accessNote = "";
+    if (Object.keys(result.domainAccess).length > 0) {
+      const acc = await applyDomainAccess(result.domainAccess, (d) => ({
+        projectId: extra.projectIds[d] ?? currentProjectId,
+        moduleId:  extra.moduleIds[d]  ?? currentModuleId,
+      }));
+      accessNote = ` — access: ${acc.rbacRoles} role grant set(s), ${acc.abacDomains} ABAC domain(s)` +
+        (acc.warnings.length ? ` (${acc.warnings.length} warning(s): ${acc.warnings[0]})` : "");
+    }
     setBackendLoadStatus(
       `✅ Imported ${result.totalDomains} domain model(s), ${result.totalAttributes} attribute(s)` +
       (result.skippedSynthesized ? ` (${result.skippedSynthesized} synthesized attribute(s) skipped)` : "") +
-      (failed ? ` — ${created} table(s) saved to backend, ${failed} failed (still available locally).` : ` — saved to backend.`)
+      (failed ? ` — ${created} table(s) saved to backend, ${failed} failed (still available locally).` : ` — saved to backend.`) +
+      accessNote
     );
     setTimeout(() => setBackendLoadStatus(null), 6000);
   }
@@ -1517,6 +1579,11 @@ function handleViewConfig(domainName: string, cfg: DomainViewConfig) {
           onRedirectToCreate={handleRedirectToCreate}
           onGoToCreateDomain={() => setTab("create")}
           onAddValidationRule={handleAddValidationRule}
+          availableRoles={availableRoles}
+          permissions={permissions}
+          onChangePermissions={handleChangePermissions}
+          onSavePermissions={handleSavePermissions}
+          onLoadPermissions={handleLoadPermissions}
         />
       )}
       {tab === "ui" && (
