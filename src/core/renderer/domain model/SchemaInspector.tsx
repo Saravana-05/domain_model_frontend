@@ -45,7 +45,7 @@ import { draftToDomainFieldCore, draftToUIHint, draftToABACRule, draftToRBACRule
 import { ImportDomainModelModal } from "./ImportDomainModelModal";
 import type { DomainModelImportResult } from "./domainImport";
 import { useProjectStore } from "../../store/projectStore";
-import type { DomainPermissionRule } from "./DomainPermissionsPanel";
+import type { DomainPermissionRule } from "./Domainpermissionspanel";
 import { apiGetDomainAbac, apiSaveDomainAbac, apiListRoleNames } from "../../api/abacapi";
 
 // ════════════════════════════════════════════════════════════════════════════
