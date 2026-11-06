@@ -1,5 +1,6 @@
 import React, { useState, useMemo, useRef, useEffect } from "react";
 import { useCanDesign } from "../../components/Can";
+import { refreshAuthContext } from "../../api/datastoreApi";
 import { useAuthStore } from "../../../store/authStore";
 import StorageIcon             from "@mui/icons-material/Storage";
 import LinkOutlinedIcon        from "@mui/icons-material/LinkOutlined";
@@ -132,14 +133,19 @@ export function DomainModelTab({
   // Designing (edit/delete domains + fields) needs an admin role or the
   // "domain_model" edit permission — see useCanDesign() in components/Can.tsx.
   const canManage = useCanDesign();
-  // Deleting a domain model needs an explicit "delete" grant on that domain's
-  // RBAC resource (Access Control matrix). Unlike canManage, this does NOT
-  // auto-pass for admin system roles, so unticking Delete hides the button.
+  // Deleting a domain model: admin system roles (PRODUCT_ADMIN / ORG_ADMIN) always
+  // may; everyone else needs an explicit "delete" grant on that domain's RBAC
+  // resource (Access Control matrix). The backend re-checks every request.
+  const isAdminUser = useAuthStore((s) => s.isAdmin());
   const userPerms = useAuthStore((s) => s.user?.permissions);
   const canDeleteDomain = (domain: string) =>
+    isAdminUser ||
     (userPerms ?? []).some(
       (p) => p.resource.toLowerCase() === domain.toLowerCase() && p.action.toLowerCase() === "delete"
     );
+  // Permissions are only refreshed at session start — re-read them whenever
+  // this page opens so a grant made in Access Control shows up without re-login.
+  useEffect(() => { void refreshAuthContext(); }, []);
   const [renaming, setRenaming] = useState<{ domain: string; value: string } | null>(null);
   const [confirmDel, setConfirmDel] = useState<{ domain: string; field?: string } | null>(null);
   const [busy, setBusy] = useState(false);

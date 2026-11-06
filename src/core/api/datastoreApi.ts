@@ -8,6 +8,8 @@
 import { useAuthStore } from "../../store/authStore";
 import { useProjectStore } from "../store/projectStore";
 import { PermissionError, extractDetail } from "./permissionError";
+import { apiListResources, apiCreateResource, apiCreatePermission } from "./rbacApi";
+import { apiFetchMe } from "./authApi";
 
 const API_BASE = import.meta.env.VITE_API_URL || "https://ab2dgab6euwc4d2f3dkgddmxiu0mmuxx.lambda-url.ap-south-1.on.aws";
 
@@ -470,6 +472,42 @@ function resolveScope(
   return { project_id, module_id };
 }
 
+const DOMAIN_RBAC_ACTIONS = ["create", "view", "edit", "delete"];
+
+/**
+ * Make sure a domain model has an RBAC resource (+ create/view/edit/delete
+ * actions) so it shows up in Access Control and a role can be granted Delete
+ * on it. Best-effort: users who may not manage RBAC (403) are skipped silently.
+ * Afterwards the signed-in user's permissions are re-read so a fresh grant
+ * shows up without logging out.
+ */
+export async function ensureDomainRbacResource(domainName: string): Promise<void> {
+  if (!domainName) return;
+  try {
+    const list: any[] = (await apiListResources()).data ?? [];
+    const existing = list.find((r) => String(r.name).toLowerCase() === domainName.toLowerCase());
+    let id: string | undefined = existing?.id;
+    if (!id) {
+      const label = domainName.charAt(0).toUpperCase() + domainName.slice(1);
+      id = (await apiCreateResource(label, `Domain model: ${domainName}`)).data.id as string;
+    }
+    let perms: any[] = existing?.permissions ?? [];
+    if (typeof perms === "string") { try { perms = JSON.parse(perms); } catch { perms = []; } }
+    const have = new Set(perms.map((p) => String(p.action).toLowerCase()));
+    for (const action of DOMAIN_RBAC_ACTIONS) if (!have.has(action)) await apiCreatePermission(id!, action);
+  } catch { /* not permitted / backend unreachable — an admin can still Sync in RBAC → Resources */ }
+  await refreshAuthContext();
+}
+
+/** Re-read roles/permissions from /auth/me into the auth store. */
+export async function refreshAuthContext(): Promise<void> {
+  const { token, setAuthContext } = useAuthStore.getState();
+  if (!token) return;
+  const ctx = await apiFetchMe(token);
+  if (ctx) setAuthContext(ctx);
+}
+
+
 /**
  * POST /datastore/create — create a table from a schema.
  *
@@ -492,6 +530,8 @@ export async function apiCreateDomain(req: BackendCreateRequest): Promise<Backen
   });
   // Let the sidebar tree pick up the new domain model.
   useProjectStore.getState().bumpTree();
+  // Register it in RBAC so Delete/Edit grants can be given on it.
+  await ensureDomainRbacResource(req.table_name);
   return res;
 }
 
@@ -558,6 +598,11 @@ export async function apiSubmitDraft(draftId: string): Promise<BackendSubmitDraf
   const res = await apiFetch(`/datastore/drafts/${encodeURIComponent(draftId)}/submit`, { method: "POST" });
   // Submitting generates real domain models — refresh the sidebar tree.
   useProjectStore.getState().bumpTree();
+  const created: any[] = res?.tables ?? res?.created ?? res?.results ?? [];
+  for (const t of created) {
+    const n = typeof t === "string" ? t : t?.table_name;
+    if (n) await ensureDomainRbacResource(n);
+  }
   return res;
 }
 
