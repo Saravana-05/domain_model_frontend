@@ -23,6 +23,9 @@ export function dbLocation(res: BackendCreateResponse): string {
 export function buildJunctionDomain(
   parentDomainName: string,
   relatedDomainName: string,
+  /** "list" = a record can link to MANY related records (the form then
+   *  offers "+ Add"); otherwise the form shows a single normal entry. */
+  cardinality?: string,
 ): DomainDefinition {
   const junctionName = `${parentDomainName}_${relatedDomainName}`;
   const parentIdField  = `${parentDomainName}Id`;
@@ -31,7 +34,7 @@ export function buildJunctionDomain(
     name: junctionName,
     fields: {
       [parentIdField]:  { type: "string" },
-      [relatedIdField]: { type: "string" },
+      [relatedIdField]: cardinality ? { type: "string", cardinality: cardinality as any } : { type: "string" },
     },
   };
 }

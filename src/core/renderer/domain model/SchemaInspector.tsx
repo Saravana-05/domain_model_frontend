@@ -558,11 +558,12 @@ async function ensureJunctionDomain(
   parentDomainName: string,
   relatedDomainName: string,
   dbBackend: string,
+  cardinality?: string,
 ) {
   const pairKey = [parentDomainName, relatedDomainName].sort().join("__");
   if (extra.junctionPairs.has(pairKey)) return; // ✅ deduplicate
 
-  const jd = buildJunctionDomain(parentDomainName, relatedDomainName);
+  const jd = buildJunctionDomain(parentDomainName, relatedDomainName, cardinality);
 
   // Always build rd with parent fields
   // If cbranch was quick-created with empty fields, use parent fields
@@ -721,6 +722,11 @@ if (draft.isPartOf === "fk") {
           setBackendLoadStatus(`⚠️ Could not add "${fkFieldName}" to "${domainName}": ${err?.message}`);
         }
         setTimeout(() => setBackendLoadStatus(null), 5000);
+     } else if (!draft.isPartOf) {
+        // 🔀 Association — create the junction table (no column on either side).
+        saveRelationMarker(domainName, fieldName, newField);
+        await ensureJunctionDomain(domainName, draft.relatedDomain, dbBackend, draft.cardinality || undefined);
+        setTimeout(() => setBackendLoadStatus(null), 5000);
      } else if (draft.isPartOf) {
         // ✅ CHECKED — add parentId FK into child (relatedDomain) table
         const parentIdField = `${domainName}Id`;
@@ -739,7 +745,7 @@ if (draft.isPartOf === "fk") {
               ...prev.extraFields,
               [draft.relatedDomain]: {
                 ...(prev.extraFields[draft.relatedDomain] ?? {}),
-                [parentIdField]: { type: "string", relationKind: "integral" },
+                [parentIdField]: { type: "string", relationKind: "integral", cardinality: (draft.cardinality as any) || undefined },
               },
             },
           }));
@@ -751,7 +757,7 @@ if (draft.isPartOf === "fk") {
               // (e.g. branch.clinicId → clinic) — the child only ever
               // exists under its parent, so the view-builder hides
               // Add Existing / Remove for it and only allows Create.
-              [parentIdField]: { type: "string" as FieldType, relationKind: "integral" },
+              [parentIdField]: { type: "string" as FieldType, relationKind: "integral", cardinality: (draft.cardinality as any) || undefined },
             };
             const req = domainToBackendRequest({
               registry: liveSchemas._layers?.validationRegistry ?? {},
@@ -900,7 +906,7 @@ if (draft.isPartOf === "fk") {
         setTimeout(() => setBackendLoadStatus(null), 5000);
       } else if (!draft.isPartOf) {
         // ❌ UNCHECKED — create junction table
-        await ensureJunctionDomain(domainName, draft.relatedDomain, dbBackend);
+        await ensureJunctionDomain(domainName, draft.relatedDomain, dbBackend, draft.cardinality || undefined);
       } else {
         // ✅ CHECKED — add domainNameId into child (relatedDomain) table only
         const parentIdField = `${domainName}Id`;
@@ -910,7 +916,7 @@ if (draft.isPartOf === "fk") {
             ...prev.extraFields,
             [draft.relatedDomain]: {
               ...(prev.extraFields[draft.relatedDomain] ?? {}),
-              [parentIdField]: { type: "string", relationKind: "integral" },
+              [parentIdField]: { type: "string", relationKind: "integral", cardinality: (draft.cardinality as any) || undefined },
             },
           },
         }));
@@ -922,7 +928,7 @@ if (draft.isPartOf === "fk") {
             // (e.g. branch.clinicId → clinic) — the child only ever
             // exists under its parent, so the view-builder hides
             // Add Existing / Remove for it and only allows Create.
-            [parentIdField]: { type: "string" as FieldType, relationKind: "integral" },
+            [parentIdField]: { type: "string" as FieldType, relationKind: "integral", cardinality: (draft.cardinality as any) || undefined },
           };
           const req = domainToBackendRequest({
             registry: liveSchemas._layers?.validationRegistry ?? {},
