@@ -1249,4 +1249,4 @@ export function CreateDomainTab({ onAdd, registry = {}, domainNames = [], onQuic
       </div>
     </div>
   );
-}
+} 
