@@ -396,7 +396,7 @@ export function CreateDomainTab({ onAdd, registry = {}, domainNames = [], onQuic
         // display-only marker (typed name preserved), not a real column.
         if (d.relationKind === "integral") {
           const parentIdField = `${name}Id`;
-          upsertRelatedDomain(d.relatedDomain, { [parentIdField]: { type: "string", relationKind: "integral" } });
+          upsertRelatedDomain(d.relatedDomain, { [parentIdField]: { type: "string", relationKind: "integral", cardinality: (d.cardinality as any) || undefined } });
 
           domainFields[n] = { type: "relation", relatedDomain: d.relatedDomain, relationKind: "integral", cardinality: (d.cardinality as any) || undefined, isMarkerOnly: true } as any;
           const fp = `${name}.${n}`;
@@ -414,7 +414,7 @@ export function CreateDomainTab({ onAdd, registry = {}, domainNames = [], onQuic
             name: junctionName,
             fields: {
               [`${name}Id`]:            { type: "string" },
-              [`${d.relatedDomain}Id`]: { type: "string" },
+              [`${d.relatedDomain}Id`]: d.cardinality ? { type: "string", cardinality: d.cardinality as any } : { type: "string" },
             },
           });
         }

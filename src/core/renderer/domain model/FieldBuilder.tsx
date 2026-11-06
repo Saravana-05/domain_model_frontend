@@ -48,6 +48,10 @@ export interface FieldBuilderProps {
   compact?: boolean;
 }
 
+/** The Integral / Association picker is hidden for now: every linked domain
+ *  is saved as an "association". Flip to true to bring the picker back. */
+const SHOW_RELATION_KIND_SELECTOR = false;
+
 export function FieldBuilder({
   submitLabel, initialName = "", initialDraft, onSubmit, onCancel,
   showAllLayers = true, showLabelOnly = false, registry = {}, domainNames = [],
@@ -115,6 +119,12 @@ const [fieldName, setFieldName] = useState(initialName);
           ? resolveRelatedDomain(finalDraft.relatedDomain)
           : toPascalCase(finalDraft.relatedDomain),
         isPartOf: isPartOfRef.current,
+        // Every linked domain is an association while the picker is hidden.
+        // Editing a field that is already integral keeps its kind, so
+        // existing data isn't silently converted.
+        relationKind: SHOW_RELATION_KIND_SELECTOR || initialDraft?.relationKind === "integral"
+          ? finalDraft.relationKind
+          : "association",
       };
     }
 
@@ -254,25 +264,25 @@ const [fieldName, setFieldName] = useState(initialName);
                   const val = e.target.value;
                   if (val === "") {
                     set("relatedDomain", "");
-                    isPartOfRef.current = "fk";
-                    set("isPartOf", "fk");
+                    isPartOfRef.current = false;
+                    set("isPartOf", false);
                   } else if (val === "__new__") {
                     // Suggest the field name as a starting point for the
                     // new domain's name — editable in the input that
                     // appears below, not tied to it after this.
                     const suggestion = fieldName.trim() && fieldName.trim() !== parentDomainName ? fieldName.trim() : "";
                     set("relatedDomain", suggestion);
-                    // Default is a plain link (this domain gets a real
-                    // column) either way — the Integral/Association
+                    // Default is an association (junction table, no
+                    // column on either side) either way — the Integral/Association
                     // toggle below lets you switch direction, regardless
                     // of whether the target exists yet or is about to be
                     // created.
-                    isPartOfRef.current = "fk";
-                    set("isPartOf", "fk");
+                    isPartOfRef.current = false;
+                    set("isPartOf", false);
                   } else {
                     set("relatedDomain", val);
-                    isPartOfRef.current = "fk";
-                    set("isPartOf", "fk");
+                    isPartOfRef.current = false;
+                    set("isPartOf", false);
                   }
                 }}
               >
@@ -303,7 +313,7 @@ const [fieldName, setFieldName] = useState(initialName);
         <>Integral — adds <code>{parentDomainName}Id</code> to <strong>{draft.relatedDomain}</strong></>
       )}
     </span>
-    {relationShapeSelector}
+    {SHOW_RELATION_KIND_SELECTOR && relationShapeSelector}
     <button type="button"
       onClick={() => { set("relatedDomain",""); set("listDomain",""); set("type","string"); set("isPartOf", true); isPartOfRef.current = true; }}
       style={{ fontSize:13, color:"#9ca3af", background:"none", border:"none",
@@ -341,7 +351,7 @@ const [fieldName, setFieldName] = useState(initialName);
                         style={{ minWidth: 160 }}
                       />
                     </label>
-                    {relationShapeSelector}
+                    {SHOW_RELATION_KIND_SELECTOR && relationShapeSelector}
                     {!compact && (
                       <button type="button" className="btn btn-primary"
                         disabled={!canCreate}
