@@ -87,6 +87,8 @@ export interface CreateDomainPayload {
  *  fully restore an in-progress (not-yet-created) domain build. Used by
  *  the pause/resume "domain stack" below. */
 interface DomainDraft {
+  /** Business name as typed (e.g. "Client Details"). */
+  label?:         string;
   fields:         Record<string, FieldDraft>;
   dbBackend:      "postgresql" | "dynamodb";
   versioned:      boolean;
@@ -95,10 +97,17 @@ interface DomainDraft {
 
 export function CreateDomainTab({ onAdd, registry = {}, domainNames = [], onQuickCreateDomain, schemas, initialDomainName, onRedirectToCreate, pendingFK, onAddValidationRule }: CreateDomainTabProps) {
   const [domainName, setDomainName] = useState(initialDomainName || "");
+  // Business name ("Client Details") — what the user typed, kept alongside
+  // the storage name ("ClientDetails"). It follows whatever is typed in the
+  // name box until the user edits it by hand (labelTouched).
+  const [domainLabel, setDomainLabel] = useState(initialDomainName || "");
+  const [labelTouched, setLabelTouched] = useState(false);
 
   useEffect(() => {
     if (initialDomainName) {
       setDomainName(initialDomainName);
+      setDomainLabel(initialDomainName);
+      setLabelTouched(false);
     }
   }, [initialDomainName]);
   const [dbBackend,  setDbBackend]  = useState<"postgresql" | "dynamodb">("postgresql");
@@ -194,6 +203,8 @@ export function CreateDomainTab({ onAdd, registry = {}, domainNames = [], onQuic
    *  message (status) is kept so the user still sees what was created. */
   function resetForm() {
     setDomainName("");
+    setDomainLabel("");
+    setLabelTouched(false);
     setFields({});
     setGenerated(false);
     setVersioned(false);
@@ -215,10 +226,12 @@ export function CreateDomainTab({ onAdd, registry = {}, domainNames = [], onQuic
     if (!validName) return [];
     return Object.entries(fields)
       .filter(([, d]) => d.type === "relation" && d.relatedDomain && !d.relatedDomain.startsWith("__new__:"))
-      .map(([, d]) => {
-        const related = d.relatedDomain;
-        return { parent: domainName, related, junctionName: `${domainName}_${related}` };
-      });
+      .filter(([, d]) => d.isPartOf !== "fk" && d.relationKind !== "integral")
+      .flatMap(([, d]) =>
+        Array.from(new Set(d.relatedDomains?.length ? d.relatedDomains : [d.relatedDomain])).map((related) => (
+          { parent: domainName, related, junctionName: `${domainName}_${related}` }
+        )),
+      );
   }, [fields, domainName, validName]);
 
   // NOTE: there used to be a useEffect here that force-upgraded any
@@ -269,12 +282,15 @@ export function CreateDomainTab({ onAdd, registry = {}, domainNames = [], onQuic
 
     setDrafts((prev) => ({
       ...prev,
-      [domainName]: { fields: fieldsWithCommitted, dbBackend, versioned, expandedFields },
+      [domainName]: { label: domainLabel, fields: fieldsWithCommitted, dbBackend, versioned, expandedFields },
     }));
     setDraftOrder((prev) => [...prev.filter((n) => n !== domainName), domainName]);
 
     const existing = drafts[relatedDomainName];
     setDomainName(relatedDomainName);
+    // Default the label to the related domain as it was typed (before PascalCase).
+    setDomainLabel(existing?.label ?? draft.relatedDomain ?? relatedDomainName);
+    setLabelTouched(!!existing?.label);
     setFields(existing ? existing.fields : {});
     setDbBackend(existing?.dbBackend ?? "postgresql");
     setVersioned(existing?.versioned ?? false);
@@ -293,12 +309,14 @@ export function CreateDomainTab({ onAdd, registry = {}, domainNames = [], onQuic
     setDrafts((prev) => {
       const next = { ...prev };
       delete next[name];
-      next[domainName] = { fields, dbBackend, versioned, expandedFields };
+      next[domainName] = { label: domainLabel, fields, dbBackend, versioned, expandedFields };
       return next;
     });
     setDraftOrder((prev) => [...prev.filter((n) => n !== name), domainName]);
 
     setDomainName(name);
+    setDomainLabel(target.label ?? name);
+    setLabelTouched(!!target.label);
     setFields(target.fields);
     setDbBackend(target.dbBackend);
     setVersioned(target.versioned);
@@ -308,7 +326,7 @@ export function CreateDomainTab({ onAdd, registry = {}, domainNames = [], onQuic
   }
 
   function buildPayload(): CreateDomainPayload {
-    return buildPayloadFor(domainName, fields, dbBackend, versioned);
+    return buildPayloadFor(domainName, fields, dbBackend, versioned, {}, domainLabel);
   }
 
   /**
@@ -345,6 +363,7 @@ export function CreateDomainTab({ onAdd, registry = {}, domainNames = [], onQuic
     dbBackendArg: "postgresql" | "dynamodb",
     versionedArg: boolean,
     externalKnownFields: Record<string, Record<string, DomainFieldCore>> = {},
+    labelArg?: string,
   ): CreateDomainPayload {
     // Domain model names are stored PascalCase, however they were typed.
     const name = toPascalCase(rawName);
@@ -408,23 +427,34 @@ export function CreateDomainTab({ onAdd, registry = {}, domainNames = [], onQuic
         // gets added to THIS domain's own field list — no marker, no
         // column — the junction table itself is the complete record of
         // the relationship, same as the original (pre-marker) behavior.
-        const junctionName = `${name}_${d.relatedDomain}`;
-        if (!junctionDomains.find((j) => j.name === junctionName)) {
-          junctionDomains.push({
-            name: junctionName,
-            fields: {
-              [`${name}Id`]:            { type: "string" },
-              [`${d.relatedDomain}Id`]: d.cardinality ? { type: "string", cardinality: d.cardinality as any } : { type: "string" },
-            },
-          });
+        // One field may link several domains (d.relatedDomains) — each gets
+        // its own junction table.
+        const linkedTargets = Array.from(new Set(d.relatedDomains?.length ? d.relatedDomains : [d.relatedDomain]));
+        for (const target of linkedTargets) {
+          const junctionName = `${name}_${target}`;
+          if (!junctionDomains.find((j) => j.name === junctionName)) {
+            junctionDomains.push({
+              name: junctionName,
+              fields: {
+                [`${name}Id`]:   { type: "string" },
+                [`${target}Id`]: d.cardinality ? { type: "string", cardinality: d.cardinality as any } : { type: "string" },
+              },
+            });
+          }
         }
         // Display-only marker so the association shows up in the Domain
         // Model table and in the exported JSON (never a backend column).
-        domainFields[n] = { type: "relation", relatedDomain: d.relatedDomain, relationKind: "association", cardinality: (d.cardinality as any) || undefined, isMarkerOnly: true } as any;
+        domainFields[n] = {
+          type: "relation", relatedDomain: d.relatedDomain, relationKind: "association",
+          relatedDomains: linkedTargets.length > 1 ? linkedTargets : undefined,
+          cardinality: (d.cardinality as any) || undefined, isMarkerOnly: true,
+        } as any;
         uiHints[`${name}.${n}`] = { label: primaryLabel(d.labels, n) };
-        const targetKnown = !!schemas?.domains?.[d.relatedDomain] || !!externalKnownFields[d.relatedDomain];
-        if (!targetKnown && !relatedDomains.find((r) => r.name === d.relatedDomain)) {
-          relatedDomains.push({ name: d.relatedDomain, fields: {} });
+        for (const target of linkedTargets) {
+          const targetKnown = !!schemas?.domains?.[target] || !!externalKnownFields[target];
+          if (!targetKnown && !relatedDomains.find((r) => r.name === target)) {
+            relatedDomains.push({ name: target, fields: {} });
+          }
         }
         continue;
       }
@@ -462,7 +492,8 @@ export function CreateDomainTab({ onAdd, registry = {}, domainNames = [], onQuic
     const fieldLabels: Record<string, Record<"en" | "ta" | "ar", string>> = {};
     for (const [n, d] of Object.entries(fieldsArg)) fieldLabels[n] = d.labels;
 
-    return { domain: { name, fields: domainFields }, uiHints, rbacRules, abacRules, dbBackend: dbBackendArg, versioned: versionedArg, junctionDomains, relatedDomains, fieldLabels };
+    const cleanLabel = labelArg?.trim();
+    return { domain: { name, ...(cleanLabel ? { label: cleanLabel } : {}), fields: domainFields }, uiHints, rbacRules, abacRules, dbBackend: dbBackendArg, versioned: versionedArg, junctionDomains, relatedDomains, fieldLabels };
   }
 
   /**
@@ -500,6 +531,7 @@ export function CreateDomainTab({ onAdd, registry = {}, domainNames = [], onQuic
     );
     const req = domainToBackendRequest({
       domainName: payload.domain.name,
+      label:      payload.domain.label,
       fields:     backendFields as any,
       uiHints:    payload.uiHints    as any,
       rbacRules:  payload.rbacRules  as any,
@@ -635,11 +667,11 @@ export function CreateDomainTab({ onAdd, registry = {}, domainNames = [], onQuic
   async function createAllDomains() {
     if (!canCreate) return;
 
-    const chain: Array<{ name: string; fields: Record<string, FieldDraft>; dbBackend: "postgresql" | "dynamodb"; versioned: boolean }> = [
-      { name: toPascalCase(domainName), fields, dbBackend, versioned },
+    const chain: Array<{ name: string; label?: string; fields: Record<string, FieldDraft>; dbBackend: "postgresql" | "dynamodb"; versioned: boolean }> = [
+      { name: toPascalCase(domainName), label: domainLabel, fields, dbBackend, versioned },
       ...draftOrder.slice().reverse().map((n) => {
         const d = drafts[n]!;
-        return { name: toPascalCase(n), fields: d.fields, dbBackend: d.dbBackend, versioned: d.versioned };
+        return { name: toPascalCase(n), label: d.label, fields: d.fields, dbBackend: d.dbBackend, versioned: d.versioned };
       }),
     ];
 
@@ -650,7 +682,7 @@ export function CreateDomainTab({ onAdd, registry = {}, domainNames = [], onQuic
     let anyErr = false;
 
     for (const unit of chain) {
-      const payload = buildPayloadFor(unit.name, unit.fields, unit.dbBackend, unit.versioned, knownFieldsMap);
+      const payload = buildPayloadFor(unit.name, unit.fields, unit.dbBackend, unit.versioned, knownFieldsMap, unit.label);
       const messages = await createDomainFromPayload(payload);
       allMessages.push(`${unit.name}: ${messages.join(" · ")}`);
       onAdd(payload);
@@ -741,6 +773,9 @@ export function CreateDomainTab({ onAdd, registry = {}, domainNames = [], onQuic
   function openDraft(draft: BackendDraft) {
     const p = draft.payload ?? ({} as any);
     setDomainName(draft.domain_name);
+    const savedLabel = (p.payload as any)?.domain?.label as string | undefined;
+    setDomainLabel(savedLabel ?? draft.domain_name);
+    setLabelTouched(!!savedLabel);
     setFields((p.fields ?? {}) as Record<string, FieldDraft>);
     setDbBackend((p.db_backend as "postgresql" | "dynamodb") ?? "postgresql");
     setVersioned(!!p.versioned);
@@ -977,13 +1012,29 @@ export function CreateDomainTab({ onAdd, registry = {}, domainNames = [], onQuic
           <div className="si-step-label">Step 1 — Domain name &amp; storage</div>
           <div className="si-form-row">
             <label className="si-form-label" style={{ maxWidth: 280 }}>
-              {/* Type it however you like — saved as <code>{domainName.trim() ? toPascalCase(domainName) : "PascalCase"}</code> */}
+              <span className="si-form-label-text">
+                Domain model name * {domainName.trim() && validName && <span className="si-hint">saved as {toPascalCase(domainName)}</span>}
+              </span>
+              {/* Type it however you like — saved as PascalCase. What was typed is kept as the label below. */}
               <input
                 className={`si-form-input ${domainName && !validName ? "si-form-input--error" : ""}`}
                 value={domainName}
-                onChange={(e) => { setDomainName(e.target.value); setStatus({ state: "idle", msg: "" }); setGenerated(false); }}
+                onChange={(e) => {
+                  const val = e.target.value;
+                  setDomainName(val);
+                  if (!labelTouched) setDomainLabel(val);
+                  setStatus({ state: "idle", msg: "" }); setGenerated(false);
+                }}
                 onBlur={() => { if (domainName.trim()) setDomainName(toPascalCase(domainName)); }}
-                placeholder="product" />
+                placeholder="e.g. Client Details" />
+            </label>
+            <label className="si-form-label" style={{ maxWidth: 280 }}>
+              <span className="si-form-label-text">Label (business name)</span>
+              <input
+                className="si-form-input"
+                value={domainLabel}
+                onChange={(e) => { setDomainLabel(e.target.value); setLabelTouched(true); setGenerated(false); }}
+                placeholder="e.g. Client Details" />
             </label>
             {domainName && !validName && <span className="si-inline-error">Name can only contain letters, numbers, spaces, - and _</span>}
           </div>
@@ -1041,6 +1092,7 @@ export function CreateDomainTab({ onAdd, registry = {}, domainNames = [], onQuic
                                 </button>
                               )}
                               {name}
+                              {d.labels?.en?.trim() && d.labels.en.trim() !== name && (<span className="si-muted" style={{ marginLeft: 6 }}>({d.labels.en.trim()})</span>)}
                             </td>
                             <td>
                               {d.type === "relation" ? <Badge label="domain_model" color="indigo" />

@@ -10,6 +10,7 @@ import type {
   FieldUIConfig,
   RBACFieldRule,
 } from "./types";
+import { EMAIL_RULE, hasEmailRule } from "./types";
 
 // ── Named validation registry rules → flat ValidationRule[] ──────────────────
 // Every field-level runtime check (formplugin.tsx's validateField) only ever
@@ -127,7 +128,7 @@ export function buildSchemas(input: BuildSchemasInput): AllSchemas {
 
   // ── Layer 1: Domain model ───────────────────────────────────────────────────
   for (const domainDef of input.domains) {
-    const { name: domainName, fields: fieldDefs } = domainDef;
+    const { name: domainName, fields: fieldDefs, label: domainLabel } = domainDef;
     const domainFields: Record<string, DomainFieldDef> = {};
 
     for (const [fieldName, fieldDef] of Object.entries(fieldDefs)) {
@@ -153,6 +154,9 @@ export function buildSchemas(input: BuildSchemasInput): AllSchemas {
       // how cardinality/relationKind are already checked just below.
       if (fieldDef.relatedDomain) {
         fieldEntry.relatedDomain = fieldDef.relatedDomain;
+      }
+      if (fieldDef.relatedDomains?.length) {
+        fieldEntry.relatedDomains = fieldDef.relatedDomains;
       }
       if (fieldDef.type === "list" && fieldDef.listDomain) {
         fieldEntry.listDomain = fieldDef.listDomain;
@@ -189,6 +193,11 @@ export function buildSchemas(input: BuildSchemasInput): AllSchemas {
         resolved.push(...fieldDef.validations);
       }
 
+      // Email fields always validate the address format (unless a rule already does).
+      if ((fieldDef.type as string) === "email" && !hasEmailRule(resolved)) {
+        resolved.push({ ...EMAIL_RULE });
+      }
+
       if (resolved.length) {
         validations[fullPath] = resolved;
       }
@@ -205,7 +214,7 @@ export function buildSchemas(input: BuildSchemasInput): AllSchemas {
       }
     }
 
-    domains[domainName] = { fields: domainFields };
+    domains[domainName] = domainLabel ? { label: domainLabel, fields: domainFields } : { fields: domainFields };
   }
 
   // ── Layer 2: UI configuration ───────────────────────────────────────────────

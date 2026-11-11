@@ -1,6 +1,6 @@
 import type { FieldType, ComponentType, FontSize, FontWeight, TextAlign, FieldWidth } from "../../schema/types";
 
-export const FIELD_TYPES: FieldType[] = ["string", "number", "decimal", "boolean", "date", "image", "relation"];
+export const FIELD_TYPES: FieldType[] = ["string", "email", "number", "decimal", "boolean", "date", "image", "relation"];
 /** Display label only — the underlying FieldType value ("string"/"relation")
  *  stays exactly as-is everywhere else (backend requests, internal state,
  *  the FieldType union itself); this only changes what the person sees in

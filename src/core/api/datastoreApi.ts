@@ -6,6 +6,7 @@
  */
 
 import { useAuthStore } from "../../store/authStore";
+import { EMAIL_RULE, hasEmailRule } from "../schema/types";
 import { useProjectStore } from "../store/projectStore";
 import { PermissionError, extractDetail } from "./permissionError";
 import { apiListResources, apiCreateResource, apiCreatePermission } from "./rbacApi";
@@ -38,6 +39,7 @@ export interface BackendSchemaField {
   validationRefs?: string[];       // attached named validation-rule tags
   // Extended metadata stored via model_config extra: allow
   component?:    string;
+  format?:       string;           // "email" marks an email field (stored as text)
   placeholder?:  string;
   datasource?:   string;
   ui_config?:    Record<string, any>;
@@ -48,6 +50,9 @@ export interface BackendSchemaField {
 
 export interface BackendCreateRequest {
   table_name: string;
+  /** Business name exactly as the user typed it (e.g. "Client Details").
+   *  `table_name` is the storage name (e.g. "ClientDetails"). */
+  label?:     string;
   schema:     BackendSchemaField[];
   db_backend?: "dynamodb" | "postgresql";
   versioned?: boolean;
@@ -81,6 +86,8 @@ export interface BackendCreateResponse {
 
 export interface BackendSchemaEntry {
   table_name: string;
+  /** Business name for the domain model (null/absent on older domains). */
+  label?:     string | null;
   schema:     BackendSchemaField[];
   db_backend?: "dynamodb" | "postgresql";
   versioned?: boolean;
@@ -115,6 +122,7 @@ export interface BackendRowsResponse {
 export function frontendTypeToBackend(type: string): BackendFieldType {
   switch (type) {
     case "string":  return "text";
+    case "email":   return "text"; // backend has no email type — persisted as text + format:"email"
     case "number":  return "number";
     case "boolean": return "boolean";
     case "date":    return "date";
@@ -210,13 +218,15 @@ export function domainToBackendRequest(params: {
   abacRules?:  Record<string, Record<string, any>>;   // full-path keys
   db_backend?: "dynamodb" | "postgresql";              // which DB to store data in
   versioned?:  boolean;                                 // enable version history for this domain
+  /** Business name of the domain model as typed (e.g. "Client Details"). */
+  label?:      string;
   /** Named validation registry, needed to resolve each field's
    *  validationRefs into real rules before sending — without this, a
    *  field that only has registry refs attached (no inline validations)
    *  would silently persist NO validations at all. */
   registry?: Record<string, any>;
 }): BackendCreateRequest {
-  const { domainName, fields, uiHints = {}, rbacRules = {}, abacRules = {}, db_backend, versioned, registry = {} } = params;
+  const { domainName, label: domainLabel, fields, uiHints = {}, rbacRules = {}, abacRules = {}, db_backend, versioned, registry = {} } = params;
 
   const schema: BackendSchemaField[] = Object.entries(fields).map(([fieldName, fieldDef]) => {
     const path = `${domainName}.${fieldName}`;
@@ -232,6 +242,8 @@ export function domainToBackendRequest(params: {
     };
 
     if (fieldDef.datasource)  field.datasource  = fieldDef.datasource;
+    // Email fields are stored as text; the format tag is what restores the "email" type on load.
+    if (fieldDef.type === "email" || fieldDef.format === "email") field.format = "email";
     if (fieldDef.cardinality) field.cardinality = fieldDef.cardinality;
     if (ui?.component)        field.component   = ui.component;
     if (ui?.placeholder)      field.placeholder = ui.placeholder;
@@ -263,6 +275,7 @@ export function domainToBackendRequest(params: {
       : [];
     const inlineRules: FlatValidationRule[] = Array.isArray(fieldDef.validations) ? fieldDef.validations : [];
     const allValidations = [...refRules, ...inlineRules];
+    if (fieldDef.type === "email" && !hasEmailRule(allValidations)) allValidations.push({ ...EMAIL_RULE });
     if (allValidations.length > 0) field.validations = allValidations;
 
     // Also persist the raw tag list itself (not just the rules resolved
@@ -282,6 +295,7 @@ export function domainToBackendRequest(params: {
   });
 
   const req: BackendCreateRequest = { table_name: domainName, schema };
+  if (domainLabel && domainLabel.trim()) req.label = domainLabel.trim();
   if (db_backend) req.db_backend = db_backend;
   if (versioned !== undefined) req.versioned = versioned;
   return req;
@@ -301,6 +315,7 @@ export function backendSchemaToFrontend(entry: BackendSchemaEntry): {
   rbacRules:  Record<string, Record<string, any>>;
   abacRules:  Record<string, Record<string, any>>;
   versioned:  boolean;
+  label?:     string;
 } {
   const { table_name, schema, versioned } = entry;
   const fields:    Record<string, any> = {};
@@ -312,7 +327,7 @@ export function backendSchemaToFrontend(entry: BackendSchemaEntry): {
     const path = `${table_name}.${field.field_id}`;
 
     fields[field.field_id] = {
-      type:           backendTypeToFrontend(field.type),
+      type:           (field as any).format === "email" ? "email" : backendTypeToFrontend(field.type),
       default:        field.value ?? undefined,
       datasource:     field.datasource,
       cardinality:    field.cardinality ?? undefined,
@@ -335,7 +350,7 @@ export function backendSchemaToFrontend(entry: BackendSchemaEntry): {
     if (field.abac && Object.keys(field.abac).length > 0) abacRules[path] = field.abac;
   }
 
-  return { domainName: table_name, fields, uiHints, rbacRules, abacRules, versioned: !!versioned };
+  return { domainName: table_name, label: entry.label ?? undefined, fields, uiHints, rbacRules, abacRules, versioned: !!versioned };
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -645,7 +660,7 @@ export async function apiDeleteDomain(
 /** PUT /datastore/schemas/{table} — rename a domain model and/or move it to another project/module */
 export async function apiUpdateDomain(
   tableName: string,
-  body: { new_table_name?: string; project_id?: string | number | null; module_id?: string | number | null },
+  body: { new_table_name?: string; label?: string | null; project_id?: string | number | null; module_id?: string | number | null },
 ): Promise<{ status: string; table_name?: string; old_name?: string }> {
   const res = await apiFetch(`/datastore/schemas/${encodeURIComponent(tableName)}`, {
     method: "PUT",

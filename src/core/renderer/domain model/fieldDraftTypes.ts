@@ -7,6 +7,9 @@ export interface FieldDraft {
   computed:       boolean;
   datasource:     string;
   relatedDomain:  string;
+  /** Several linked domains for ONE association field (relatedDomain is the
+   *  first of them). Omitted for ordinary single-domain relations. */
+  relatedDomains?: string[];
   cardinality:    string;
   listDomain:     string;
   /**

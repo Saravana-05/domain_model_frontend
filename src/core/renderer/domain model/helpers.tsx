@@ -20,6 +20,16 @@ export function dbLocation(res: BackendCreateResponse): string {
   return "database";
 }
 
+/** Outcome of ensuring one junction table exists (see ensureJunctionDomain
+ *  in SchemaInspector). "exists" covers both "already in the schema" and
+ *  "backend said it was already there"; "skipped" means this exact pair
+ *  was already handled earlier in the session. */
+export interface JunctionResult {
+  name:     string;
+  status:   "created" | "exists" | "skipped" | "failed";
+  message?: string;
+}
+
 export function buildJunctionDomain(
   parentDomainName: string,
   relatedDomainName: string,

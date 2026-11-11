@@ -44,13 +44,14 @@ export interface DomainModelTabProps {
   focusDomain?:          string | null;
   junctionDomains:       Set<string>;
   onAddField:            (domainName: string, fieldName: string, draft: FieldDraft) => void;
-  onEditField:           (domainName: string, oldName: string, newName: string, draft: FieldDraft) => void;
+  onEditField:          (domainName: string, oldName: string, newName: string, draft: FieldDraft) => void;
   /** Delete one attribute of a domain model (backend + local state). */
   onDeleteField?:        (domainName: string, fieldName: string) => void | Promise<void>;
   /** Delete a whole domain model (backend table + schema + local state). */
   onDeleteDomain?:       (domainName: string) => void | Promise<void>;
   /** Rename a domain model. */
-  onRenameDomain?:       (oldName: string, newName: string) => void | Promise<void>;
+  /** newLabel is the business name typed alongside the storage name. */
+  onRenameDomain?:       (oldName: string, newName: string, newLabel?: string) => void | Promise<void>;
   onViewConfig:          (domainName: string, cfg: DomainViewConfig) => void;
   onSaveBackend:         (domainName: string) => void;
   onQuickCreateDomain:   (name: string, fields: QuickCreateField[]) => void;
@@ -125,6 +126,7 @@ export function DomainModelTab({
   onAddValidationRule,
   permissions, onChangePermissions, onSavePermissions, userAttributes, availableRoles, onLoadPermissions,
 }: DomainModelTabProps) {
+
   const registry      = schemas._layers?.validationRegistry ?? {};
   const projects      = useProjectStore((s) => s.projects);
   const projectName   = (id: string) => projects.find((p) => p.id === id)?.name ?? `Project ${id}`;
@@ -148,7 +150,7 @@ export function DomainModelTab({
   // Permissions are only refreshed at session start — re-read them whenever
   // this page opens so a grant made in Access Control shows up without re-login.
   useEffect(() => { void refreshAuthContext(); }, []);
-  const [renaming, setRenaming] = useState<{ domain: string; value: string } | null>(null);
+  const [renaming, setRenaming] = useState<{ domain: string; value: string; label: string } | null>(null);
   const [confirmDel, setConfirmDel] = useState<{ domain: string; field?: string } | null>(null);
   const [busy, setBusy] = useState(false);
   const [editing, setEditing] = useState<{ domain: string; field: string } | null>(null);
@@ -226,15 +228,29 @@ export function DomainModelTab({
                     autoFocus
                     className="si-form-input"
                     style={{ height: 26, fontSize: 13, padding: "0 8px", minWidth: 160 }}
+                    title="Domain model name"
+                    placeholder="Name"
                     value={renaming.value}
-                    onChange={(e) => setRenaming({ domain: domainName, value: e.target.value })}
+                    onChange={(e) => setRenaming({ ...renaming, value: e.target.value })}
                     onKeyDown={(e) => {
-                      if (e.key === "Enter") { onRenameDomain?.(domainName, renaming.value); setRenaming(null); }
+                      if (e.key === "Enter") { onRenameDomain?.(domainName, renaming.value, renaming.label); setRenaming(null); }
                       if (e.key === "Escape") setRenaming(null);
                     }}
                   />
-                  <button className="si-edit-btn" type="button" title="Save name"
-                    onClick={() => { onRenameDomain?.(domainName, renaming.value); setRenaming(null); }}>
+                  <input
+                    className="si-form-input"
+                    style={{ height: 26, fontSize: 13, padding: "0 8px", minWidth: 160 }}
+                    title="Label (business name)"
+                    placeholder="Label (business name)"
+                    value={renaming.label}
+                    onChange={(e) => setRenaming({ ...renaming, label: e.target.value })}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") { onRenameDomain?.(domainName, renaming.value, renaming.label); setRenaming(null); }
+                      if (e.key === "Escape") setRenaming(null);
+                    }}
+                  />
+                  <button className="si-edit-btn" type="button" title="Save name & label"
+                    onClick={() => { onRenameDomain?.(domainName, renaming.value, renaming.label); setRenaming(null); }}>
                     <CheckIcon sx={{ fontSize: 13 }} />
                   </button>
                   <button className="si-edit-btn" type="button" title="Cancel" onClick={() => setRenaming(null)}>
@@ -242,7 +258,12 @@ export function DomainModelTab({
                   </button>
                 </span>
               ) : (
-                <span className="si-domain-name">{domainName}</span>
+                <>
+                  <span className="si-domain-name">{schemas.domains[domainName].label || domainName}</span>
+                  {schemas.domains[domainName].label && schemas.domains[domainName].label !== domainName && (
+                    <code className="si-hint" title="Storage name">{domainName}</code>
+                  )}
+                </>
               )}
               <span className="si-field-count">{fieldNames.length} fields</span>
               {isJunction ? (
@@ -270,8 +291,8 @@ export function DomainModelTab({
               <div className="si-card-header-actions">
                 {canManage && !isJunction && (
                   <button className="si-icon-btn" type="button"
-                    title="Edit domain model (rename)"
-                    onClick={() => setRenaming({ domain: domainName, value: domainName })}>
+                    title="Edit domain model (name & label)"
+                    onClick={() => setRenaming({ domain: domainName, value: domainName, label: schemas.domains[domainName].label ?? "" })}>
                     <EditOutlinedIcon sx={{ fontSize: 15 }} />
                     <span>Edit</span>
                   </button>
@@ -347,7 +368,9 @@ export function DomainModelTab({
                             <span className="si-relation-cell" style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
                               <Badge label="domain_model 🔗" color="indigo" />
                               <LinkOutlinedIcon sx={{ fontSize: 11 }} />
-                              <Badge label={relatedDomain} color="indigo" />
+                              {((fieldDef as any).relatedDomains?.length ? (fieldDef as any).relatedDomains as string[] : [relatedDomain]).map((rd) => (
+                                <Badge key={rd} label={rd} color="indigo" />
+                              ))}
                             </span>
                           ) : (
                             <Badge label={fieldDef.type === "string" ? "text" : fieldDef.type} color="purple" />
@@ -624,6 +647,7 @@ export function fieldDefToDraft(fieldDef: any, schemas: AllSchemas, fullPath: st
     computed:       !!fieldDef.computed,
     datasource:     (fieldDef as any).datasource ?? "",
     relatedDomain,
+    relatedDomains: (fieldDef as any).relatedDomains?.length > 1 ? (fieldDef as any).relatedDomains : undefined,
     cardinality:    (fieldDef as any).cardinality ?? "",
 
     listDomain:     (fieldDef as any).listDomain     ?? "",

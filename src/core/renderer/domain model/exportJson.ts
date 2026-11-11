@@ -22,7 +22,8 @@ import type { AllSchemas, FieldUIConfig, NamedValidationRule, RBACFieldRule, ABA
  *                        associations, which have no owner.
  */
 export interface ExportedRelation {
-  linked_to: string;
+  /** A list when one attribute links several domains at once (associations only). */
+  linked_to: string | string[];
   relationship_type: "association" | "integral";
   owned_by: string;
 }
@@ -176,7 +177,12 @@ export function buildDomainModelJson(
       };
       const relatedDomain = resolveRelatedDomain(fieldName, fieldDef, schemas.domains);
       if (relationKind === "association") {
-        out.related_domain_model = { linked_to: relatedDomain, relationship_type: "association", owned_by: "NA" };
+        // One field linking several domains exports its linked_to as a list.
+        const many = (fieldDef as any).relatedDomains as string[] | undefined;
+        out.related_domain_model = {
+          linked_to: many && many.length > 1 ? many : relatedDomain,
+          relationship_type: "association", owned_by: "NA",
+        };
       } else if (relationKind === "integral") {
         // Child side (real stored FK): owner is the related domain.
         // Parent side (explicit to-many attribute): owner is this domain.
@@ -226,6 +232,87 @@ export function buildDomainModelJson(
     };
   });
   return { domain_models };
+}
+
+// ── Project → Module → Domain model structure ───────────────────────────────
+
+export interface ExportedModule {
+  name: string;
+  description?: string;
+  domain_models: ExportedDomain[];
+}
+export interface ExportedProject {
+  name: string;
+  description?: string;
+  modules: ExportedModule[];
+  /** Domain models in this project that aren't in any module — omitted when none. */
+  domain_models?: ExportedDomain[];
+}
+export interface ExportedStructure {
+  projects: ExportedProject[];
+  /** Domain models that belong to no project — omitted when none. */
+  domain_models?: ExportedDomain[];
+}
+
+/** What the export needs to know about the hierarchy (all ids come from the backend). */
+export interface ExportScope {
+  projects: { id: string; name: string; description?: string | null }[];
+  modules:  { id: string; project_id: string; name: string; description?: string | null }[];
+  /** domainName → project_id / module_id (SchemaInspector's extra.projectIds / moduleIds). */
+  projectIds: Record<string, string>;
+  moduleIds:  Record<string, string>;
+}
+
+/**
+ * Same per-domain JSON as buildDomainModelJson(), nested the way the app is
+ * organised: Project → Module → Domain models. Every project and module is
+ * listed even when empty, so the structure round-trips through Import.
+ *
+ *   { "projects": [ { "name", "modules": [ { "name", "domain_models": [...] } ],
+ *                     "domain_models"?: [...] } ],
+ *     "domain_models"?: [...] }
+ */
+export function buildProjectStructureJson(
+  schemas: AllSchemas,
+  scope: ExportScope,
+  domainAccess: Record<string, ExportedDomainAccess> = {},
+): ExportedStructure {
+  const flat = buildDomainModelJson(schemas, domainAccess).domain_models;
+  const byModule  = new Map<string, ExportedDomain[]>();
+  const byProject = new Map<string, ExportedDomain[]>(); // project, no module
+  const unassigned: ExportedDomain[] = [];
+  const push = (m: Map<string, ExportedDomain[]>, k: string, d: ExportedDomain) => {
+    const list = m.get(k); if (list) list.push(d); else m.set(k, [d]);
+  };
+
+  const projectIdSet = new Set(scope.projects.map((p) => p.id));
+  const moduleById = new Map(scope.modules.map((m) => [m.id, m]));
+  for (const d of flat) {
+    const pid = scope.projectIds[d.name];
+    const mid = scope.moduleIds[d.name];
+    const mod = mid ? moduleById.get(mid) : undefined;
+    if (mod && projectIdSet.has(mod.project_id)) push(byModule, mod.id, d);
+    else if (pid && projectIdSet.has(pid)) push(byProject, pid, d);
+    else unassigned.push(d);
+  }
+
+  const projects: ExportedProject[] = scope.projects.map((p) => {
+    const loose = byProject.get(p.id) ?? [];
+    return {
+      name: p.name,
+      ...(p.description ? { description: p.description } : {}),
+      modules: scope.modules
+        .filter((m) => m.project_id === p.id)
+        .map((m) => ({
+          name: m.name,
+          ...(m.description ? { description: m.description } : {}),
+          domain_models: byModule.get(m.id) ?? [],
+        })),
+      ...(loose.length ? { domain_models: loose } : {}),
+    };
+  });
+
+  return { projects, ...(unassigned.length ? { domain_models: unassigned } : {}) };
 }
 
 /** Keyed "domainName.attribute_id" → just the UI-facing properties, no

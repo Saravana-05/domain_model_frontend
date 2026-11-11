@@ -14,6 +14,8 @@ import { CreateEntityModal } from "./CreateEntityModal";
 /** One domain model as the tree needs it. */
 interface TreeDomain {
   name:      string;
+  /** Business name typed by the user (e.g. "Client Details"). */
+  label?:    string;
   projectId: string | null;
   moduleId:  string | null;
 }
@@ -94,6 +96,7 @@ export function SidebarTree({
       setDomains(
         ((schemas as any).schemas ?? []).map((s: any) => ({
           name:      s.table_name,
+          label:     s.label ?? undefined,
           projectId: s.project_id ?? null,
           moduleId:  s.module_id ?? null,
         })),
@@ -138,13 +141,13 @@ export function SidebarTree({
   const domainRow = (d: TreeDomain, indent: number) => (
     <div
       key={`d:${d.name}`}
-      title={d.name}
+      title={d.label && d.label !== d.name ? `${d.label} (${d.name})` : d.name}
       style={{ ...styles.row, paddingLeft: indent, ...(activeDomain === d.name ? styles.rowActive : {}) }}
       onClick={() => onSelectDomain(d)}
     >
       <span style={styles.chevronSpacer} />
       <TableChartOutlinedIcon sx={{ fontSize: 14 }} style={{ flexShrink: 0, color: "#7dd3fc" }} />
-      <span style={styles.label}>{d.name}</span>
+      <span style={styles.label}>{d.label || d.name}</span>
     </div>
   );
 

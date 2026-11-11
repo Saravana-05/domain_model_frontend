@@ -4,10 +4,32 @@ import PaletteOutlinedIcon     from "@mui/icons-material/PaletteOutlined";
 import CheckCircleOutlinedIcon from "@mui/icons-material/CheckCircleOutlined";
 import type { AllSchemas } from "../../schema/types";
 import { Badge, CopyBlock } from "./helpers";
-import { buildDomainModelJson, buildUiConfigJson, buildValidationsJsonSplit, type ExportedDomainAccess } from "./exportJson";
+import { buildDomainModelJson, buildProjectStructureJson, buildUiConfigJson, buildValidationsJsonSplit, type ExportedDomainAccess } from "./exportJson";
 import { loadDomainAccess } from "./accessLoader";
+import { useProjectStore } from "../../store/projectStore";
+import { apiListAllModules, type BackendModule } from "../../api/moduleApi";
 
-export function ExportJsonTab({ schemas }: { schemas: AllSchemas }) {
+interface ExportJsonTabProps {
+  schemas: AllSchemas;
+  /** domainName → project_id / module_id, so each domain lands under the right Project → Module. */
+  projectIds?: Record<string, string>;
+  moduleIds?: Record<string, string>;
+}
+
+export function ExportJsonTab({ schemas, projectIds = {}, moduleIds = {} }: ExportJsonTabProps) {
+  // Projects come from the shared store; modules are fetched for ALL projects
+  // (the store only holds the current project's) so the export is complete.
+  const projects = useProjectStore((s) => s.projects);
+  const treeVersion = useProjectStore((s) => s.treeVersion);
+  const [allModules, setAllModules] = useState<BackendModule[]>([]);
+  useEffect(() => {
+    let cancelled = false;
+    apiListAllModules()
+      .then((res) => { if (!cancelled) setAllModules(res.data ?? []); })
+      .catch(() => { if (!cancelled) setAllModules([]); });
+    return () => { cancelled = true; };
+  }, [treeVersion]);
+
   // Domain-level RBAC (role → actions) + ABAC rules live in the backend, so
   // they're fetched here and embedded into each domain's JSON as `access`.
   const [domainAccess, setDomainAccess] = useState<Record<string, ExportedDomainAccess>>({});
@@ -24,6 +46,11 @@ export function ExportJsonTab({ schemas }: { schemas: AllSchemas }) {
   }, [domainKey]);
 
   const domainModelJson = buildDomainModelJson(schemas, domainAccess);
+  const structureJson = buildProjectStructureJson(
+    schemas,
+    { projects, modules: allModules, projectIds, moduleIds },
+    domainAccess,
+  );
   const uiConfigJson = buildUiConfigJson(schemas);
   const { common: commonValidations, byCategory: validationsByCategory } = buildValidationsJsonSplit(schemas);
   const realAttrCount = domainModelJson.domain_models.reduce(
@@ -38,15 +65,15 @@ export function ExportJsonTab({ schemas }: { schemas: AllSchemas }) {
       <div className="si-card">
         <div className="si-card-header">
           <StorageIcon sx={{ fontSize: 16, color: "#7e22ce" }} />
-          <span className="si-domain-name">Domain Model</span>
+          <span className="si-domain-name">Project → Module → Domain Model</span>
           <span className="si-field-count">
-            {domainModelJson.domain_models.length} domain model(s) — {realAttrCount} real attribute(s)
+            {structureJson.projects.length} project(s) — {allModules.length} module(s) — {domainModelJson.domain_models.length} domain model(s) — {realAttrCount} real attribute(s)
             {synthesizedCount > 0 ? ` + ${synthesizedCount} synthesized reverse attribute(s)` : ""} — RBAC/ABAC embedded per attribute under "access"; no UI/label data, no duplication
             {accessStatus === "loading" ? " — loading RBAC/ABAC…" : ` — RBAC/ABAC embedded for ${Object.keys(domainAccess).length} domain(s)`}
           </span>
         </div>
         <div style={{ padding: "0 16px 16px 16px" }}>
-          <CopyBlock title="Domain model JSON" code={JSON.stringify(domainModelJson, null, 2)} />
+          <CopyBlock title="Project / module / domain model JSON" code={JSON.stringify(structureJson, null, 2)} />
         </div>
       </div>
 
@@ -104,7 +131,9 @@ export function ExportJsonTab({ schemas }: { schemas: AllSchemas }) {
 
       <div className="si-tip">
         <span>
-          💡 Every attribute always carries <code>cardinality</code> (<code>"one"</code> by default, <code>"many"</code> when List is
+          💡 Domain models are nested the way the sidebar shows them: <code>projects[]</code> → <code>modules[]</code> → <code>domain_models[]</code>.
+          A project's own <code>domain_models</code> holds the ones in no module, and a top-level <code>domain_models</code> (only present when needed)
+          holds the ones in no project. Every attribute always carries <code>cardinality</code> (<code>"one"</code> by default, <code>"many"</code> when List is
           checked). <code>related_domain_model</code> only appears on actual relation attributes, and its key names the
           relationship directly instead of a generic role: <code>linked_with</code> for an association (either direction),
           <code>part_of</code> on the real stored FK (this domain is the child, e.g. <code>branch.clinic_id</code>), or
