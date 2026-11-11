@@ -710,6 +710,39 @@ async function ensureJunctionsFor(
 
   // ── Handlers ──────────────────────────────────────────────────────────────
 
+  /** Adds the real `fieldName` text column (domain-choice column) to `domainName`'s table. */
+  async function addDomainChoiceColumn(
+    domainName: string, fieldName: string, draft: FieldDraft,
+    uiHint: ReturnType<typeof draftToUIHint>, fullPath: string,
+  ) {
+    try {
+      const existingFields = liveSchemas.domains[domainName]?.fields ?? {};
+      const req = domainToBackendRequest({
+        registry: liveSchemas._layers?.validationRegistry ?? {},
+        domainName,
+        fields: {
+          ...existingFields,
+          [fieldName]: {
+            type: "string" as FieldType,
+            relationKind: "association",
+            relatedDomain: draft.relatedDomain,
+            relatedDomains: draft.relatedDomains,
+          },
+        } as any,
+        uiHints: { ...(liveSchemas.uiHints as any), [fullPath]: { ...uiHint, label: primaryLabel(draft.labels, fieldName) } },
+        rbacRules: extra.rbacRules as any, abacRules: extra.abacRules as any,
+      });
+      const res = await apiCreateDomain(req);
+      setBackendLoadStatus(
+        res.status === "success"
+          ? `✅ Column "${fieldName}" added to "${domainName}" — stores the chosen one of ${draft.relatedDomains!.join(", ")}.`
+          : `⚠️ "${fieldName}" added locally, but backend: ${res.message}`,
+      );
+    } catch (err: any) {
+      setBackendLoadStatus(`⚠️ Could not add column "${fieldName}" to "${domainName}": ${err?.message}`);
+    }
+  }
+
   async function handleAddFieldToExisting(domainName: string, fieldName: string, draft: FieldDraft): Promise<JunctionResult | undefined> {
     console.log("handleAddFieldToExisting called — type:", draft.type, "isPartOf:", draft.isPartOf, "relatedDomain:", draft.relatedDomain);
     const fullPath = `${domainName}.${fieldName}`;
@@ -801,6 +834,14 @@ if (draft.isPartOf === "fk") {
         // 🔀 Association — create the junction table (no column on either side).
         saveRelationMarker(domainName, fieldName, newField);
         const junctions = await ensureJunctionsFor(domainName, draft, dbBackend);
+        // Several domains linked by ONE field → the parent table also gets a
+        // real text column (named after the field) that stores WHICH domain
+        // the user picked; the picked record itself is linked through that
+        // domain's junction table. The form uses relatedDomains to offer the
+        // domain picker.
+        if ((draft.relatedDomains?.length ?? 0) > 1) {
+          await addDomainChoiceColumn(domainName, fieldName, draft, uiHint, fullPath);
+        }
         setTimeout(() => setBackendLoadStatus(null), 5000);
         return junctions[0];
      } else if (draft.isPartOf) {
@@ -1371,36 +1412,22 @@ function handleViewConfig(domainName: string, cfg: DomainViewConfig) {
     }
   }
 
-  async function handleRenameDomain(oldName: string, newName: string, newLabel?: string) {
+  async function handleRenameDomain(oldName: string, newName: string) {
     const next = newName.trim();
-    const cleanLabel   = (newLabel ?? "").trim();
-    const currentLabel = liveSchemas.domains[oldName]?.label ?? "";
-    const labelChanged = newLabel !== undefined && cleanLabel !== currentLabel;
-    const renamed      = next !== oldName;
-    if (!next) return;
-    if (!renamed && !labelChanged) return;
-    if (renamed && !/^[A-Za-z_][A-Za-z0-9_]*$/.test(next)) {
+    if (!next || next === oldName) return;
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(next)) {
       flash("⚠️ Domain names can only use letters, digits and underscores, and can't start with a digit.", 6000);
       return;
     }
-    if (renamed && liveSchemas.domains[next]) {
+    if (liveSchemas.domains[next]) {
       flash(`⚠️ A domain model named "${next}" already exists.`, 5000);
       return;
     }
     try {
       if (lastBackendDomainNames.current.has(oldName)) {
-        await apiUpdateDomain(oldName, {
-          ...(renamed ? { new_table_name: next } : {}),
-          ...(labelChanged ? { label: cleanLabel || null } : {}),
-        });
-        if (renamed) purgeDomainLocally(oldName);
+        await apiUpdateDomain(oldName, { new_table_name: next });
+        purgeDomainLocally(oldName);
         await handleLoadFromBackend();
-      } else if (!renamed) {
-        // Label-only change on a domain that isn't saved yet — local state only.
-        setExtra((prev) => ({
-          ...prev,
-          newDomains: prev.newDomains.map((d) => (d.name === oldName ? { ...d, label: cleanLabel || undefined } : d)),
-        }));
       } else {
         // Not saved yet — rename in local state only.
         const oldPrefix = `${oldName}.`;
@@ -1410,7 +1437,7 @@ function handleViewConfig(domainName: string, cfg: DomainViewConfig) {
           ]));
         setExtra((prev) => ({
           ...prev,
-          newDomains:  prev.newDomains.map((d) => (d.name === oldName ? { ...d, name: next, ...(labelChanged ? { label: cleanLabel || undefined } : {}) } : d)),
+          newDomains:  prev.newDomains.map((d) => (d.name === oldName ? { ...d, name: next } : d)),
           extraFields: rekey(prev.extraFields),
           uiHints:     rekey(prev.uiHints),
           rbacRules:   rekey(prev.rbacRules),
@@ -1422,7 +1449,7 @@ function handleViewConfig(domainName: string, cfg: DomainViewConfig) {
           moduleIds:   rekey(prev.moduleIds),
         }));
       }
-      flash(renamed ? `✅ Renamed "${oldName}" → "${next}".` : `✅ Label for "${oldName}" updated.`);
+      flash(`✅ Renamed "${oldName}" → "${next}".`);
     } catch (err: any) {
       flash(`❌ Could not rename "${oldName}": ${err?.message ?? String(err)}`, 6000);
     }
@@ -1431,8 +1458,19 @@ function handleViewConfig(domainName: string, cfg: DomainViewConfig) {
   async function handleDeleteField(domainName: string, fieldName: string) {
     try {
       if (lastBackendDomainNames.current.has(domainName)) {
-        await apiDeleteField(domainName, fieldName);
+        try {
+          await apiDeleteField(domainName, fieldName);
+        } catch (err: any) {
+          // Display-only relation markers (e.g. an association field like
+          // "service") have no column in the backend, so it answers 404
+          // "Field ... not found". Nothing to drop there — just clean up locally.
+          const msg = String(err?.message ?? "");
+          const isMissingOnBackend = msg.includes("API 404") || /not found in/i.test(msg);
+          if (!isMissingOnBackend) throw err;
+        }
       }
+      // Stop the saved marker from being re-hydrated on the next reload.
+      removeRelationMarker(domainName, fieldName);
       const path = `${domainName}.${fieldName}`;
       setExtra((prev) => {
         const without = <T,>(rec: Record<string, T>) => {
@@ -1529,7 +1567,6 @@ function handleViewConfig(domainName: string, cfg: DomainViewConfig) {
           freshNames.add(converted.domainName);
           const domainDef: DomainDefinition = {
             name: converted.domainName,
-            label: converted.label,
             fields: Object.fromEntries(
               Object.entries(converted.fields).map(([k, v]) => [k, {
                 type: v.type as FieldType,
@@ -1547,6 +1584,7 @@ function handleViewConfig(domainName: string, cfg: DomainViewConfig) {
                 // just one more copy of the same whitelist, in a
                 // different function.
                 relatedDomain: (v as any).relatedDomain,
+                relatedDomains: (v as any).relatedDomains,
                 cardinality: (v as any).cardinality,
                 // Same gap, one more field: validationRefs (the tag
                 // names, e.g. ["required-name"]) was never carried

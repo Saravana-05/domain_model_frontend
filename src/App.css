@@ -1542,3 +1542,10 @@ body {
 .si-multi-summary-tags .si-badge { display: inline-flex; align-items: center; gap: 5px; }
 .si-multi-remove { background: none; border: none; padding: 0; margin-left: 2px; font-size: 13px; line-height: 1; color: var(--text-muted); cursor: pointer; }
 .si-multi-remove:hover { color: var(--red-text); }
+
+/* ── Fields table: scroll sideways on narrow windows, keep Edit/Delete pinned ── */
+.si-table-scroll { overflow-x: auto; }
+.si-table td.si-actions-cell, .si-table th.si-actions-cell { position: sticky; right: 0; z-index: 1; white-space: nowrap; box-shadow: -8px 0 8px -8px rgba(0,0,0,0.5); }
+.si-table td.si-actions-cell { background: var(--surface); }
+.si-table th.si-actions-cell { background: var(--surface-alt); }
+.si-table tr:hover td.si-actions-cell { background: var(--surface-alt); }

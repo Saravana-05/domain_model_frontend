@@ -50,8 +50,7 @@ export interface DomainModelTabProps {
   /** Delete a whole domain model (backend table + schema + local state). */
   onDeleteDomain?:       (domainName: string) => void | Promise<void>;
   /** Rename a domain model. */
-  /** newLabel is the business name typed alongside the storage name. */
-  onRenameDomain?:       (oldName: string, newName: string, newLabel?: string) => void | Promise<void>;
+  onRenameDomain?:       (oldName: string, newName: string) => void | Promise<void>;
   onViewConfig:          (domainName: string, cfg: DomainViewConfig) => void;
   onSaveBackend:         (domainName: string) => void;
   onQuickCreateDomain:   (name: string, fields: QuickCreateField[]) => void;
@@ -107,6 +106,12 @@ export function inferFieldRelation(
   if (fieldDef?.type === "relation" && fieldDef?.relatedDomain) {
     return { isRelation: true, relatedDomain: fieldDef.relatedDomain };
   }
+  // A multi-domain association is stored as a real text column (it holds the
+  // chosen domain's name), so after a reload it comes back as type "string" —
+  // the linked-domain list is what marks it as a relation.
+  if (fieldDef?.relatedDomain && fieldDef?.relatedDomains?.length > 1) {
+    return { isRelation: true, relatedDomain: fieldDef.relatedDomain };
+  }
   if (fieldName.endsWith("Id")) {
     const stem = fieldName.slice(0, -2);
     // Domain names are PascalCase, FK names camelCase ("libraryId" → "Library"),
@@ -150,7 +155,7 @@ export function DomainModelTab({
   // Permissions are only refreshed at session start — re-read them whenever
   // this page opens so a grant made in Access Control shows up without re-login.
   useEffect(() => { void refreshAuthContext(); }, []);
-  const [renaming, setRenaming] = useState<{ domain: string; value: string; label: string } | null>(null);
+  const [renaming, setRenaming] = useState<{ domain: string; value: string } | null>(null);
   const [confirmDel, setConfirmDel] = useState<{ domain: string; field?: string } | null>(null);
   const [busy, setBusy] = useState(false);
   const [editing, setEditing] = useState<{ domain: string; field: string } | null>(null);
@@ -228,29 +233,15 @@ export function DomainModelTab({
                     autoFocus
                     className="si-form-input"
                     style={{ height: 26, fontSize: 13, padding: "0 8px", minWidth: 160 }}
-                    title="Domain model name"
-                    placeholder="Name"
                     value={renaming.value}
-                    onChange={(e) => setRenaming({ ...renaming, value: e.target.value })}
+                    onChange={(e) => setRenaming({ domain: domainName, value: e.target.value })}
                     onKeyDown={(e) => {
-                      if (e.key === "Enter") { onRenameDomain?.(domainName, renaming.value, renaming.label); setRenaming(null); }
+                      if (e.key === "Enter") { onRenameDomain?.(domainName, renaming.value); setRenaming(null); }
                       if (e.key === "Escape") setRenaming(null);
                     }}
                   />
-                  <input
-                    className="si-form-input"
-                    style={{ height: 26, fontSize: 13, padding: "0 8px", minWidth: 160 }}
-                    title="Label (business name)"
-                    placeholder="Label (business name)"
-                    value={renaming.label}
-                    onChange={(e) => setRenaming({ ...renaming, label: e.target.value })}
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter") { onRenameDomain?.(domainName, renaming.value, renaming.label); setRenaming(null); }
-                      if (e.key === "Escape") setRenaming(null);
-                    }}
-                  />
-                  <button className="si-edit-btn" type="button" title="Save name & label"
-                    onClick={() => { onRenameDomain?.(domainName, renaming.value, renaming.label); setRenaming(null); }}>
+                  <button className="si-edit-btn" type="button" title="Save name"
+                    onClick={() => { onRenameDomain?.(domainName, renaming.value); setRenaming(null); }}>
                     <CheckIcon sx={{ fontSize: 13 }} />
                   </button>
                   <button className="si-edit-btn" type="button" title="Cancel" onClick={() => setRenaming(null)}>
@@ -258,12 +249,7 @@ export function DomainModelTab({
                   </button>
                 </span>
               ) : (
-                <>
-                  <span className="si-domain-name">{schemas.domains[domainName].label || domainName}</span>
-                  {schemas.domains[domainName].label && schemas.domains[domainName].label !== domainName && (
-                    <code className="si-hint" title="Storage name">{domainName}</code>
-                  )}
-                </>
+                <span className="si-domain-name">{domainName}</span>
               )}
               <span className="si-field-count">{fieldNames.length} fields</span>
               {isJunction ? (
@@ -291,8 +277,8 @@ export function DomainModelTab({
               <div className="si-card-header-actions">
                 {canManage && !isJunction && (
                   <button className="si-icon-btn" type="button"
-                    title="Edit domain model (name & label)"
-                    onClick={() => setRenaming({ domain: domainName, value: domainName, label: schemas.domains[domainName].label ?? "" })}>
+                    title="Edit domain model (rename)"
+                    onClick={() => setRenaming({ domain: domainName, value: domainName })}>
                     <EditOutlinedIcon sx={{ fontSize: 15 }} />
                     <span>Edit</span>
                   </button>
@@ -344,12 +330,16 @@ export function DomainModelTab({
               />
             )}
 
+            {/* Scrolls sideways when the window is narrow (the card itself clips
+                overflow); the actions column stays pinned so Edit / Delete
+                are always reachable. */}
+            <div className="si-table-scroll">
             <table className="si-table">
               <thead>
                 <tr>
                   <th>Field</th><th>Type</th><th>Cardinality</th><th>Format</th>
                   <th>Validation Refs</th>
-                  <th></th>
+                  <th className="si-actions-cell"></th>
                 </tr>
               </thead>
               <tbody>
@@ -394,7 +384,7 @@ export function DomainModelTab({
                             </span>
                           )}
                         </td>
-                        <td>
+                        <td className="si-actions-cell">
                           {!isJunction && canManage ? (
                             <span style={{ display: "inline-flex", gap: 6 }}>
                               <button
@@ -458,6 +448,7 @@ export function DomainModelTab({
                 })}
               </tbody>
             </table>
+            </div>
 
             {/* Child domains — nested inside parent card, collapsible */}
             {(childrenMap[domainName] ?? []).length > 0 && (
