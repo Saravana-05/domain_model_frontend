@@ -13,11 +13,21 @@ interface ImportDomainModelModalProps {
 }
 
 const PLACEHOLDER = `{
-  "domain_models": [
+  "projects": [
     {
-      "name": "clinic",
-      "attributes": [
-        { "attribute_id": "name", "type": "text", "cardinality": "one" }
+      "name": "Healthcare",
+      "modules": [
+        {
+          "name": "Clinics",
+          "domain_models": [
+            {
+              "name": "clinic",
+              "attributes": [
+                { "attribute_id": "name", "type": "text", "cardinality": "one" }
+              ]
+            }
+          ]
+        }
       ]
     }
   ]
@@ -89,8 +99,9 @@ export function ImportDomainModelModal({ open, onClose, onConfirm }: ImportDomai
 
         <div className="ldm-body">
           <p style={{ fontSize: 12, color: "var(--color-text-secondary)", marginTop: 0 }}>
-            Paste JSON in the same shape as the <strong>Export → Domain model JSON</strong> card
-            (domains, attributes, types, cardinality, "integral"/"association" relations, and inline
+            Paste JSON in the same shape as the <strong>Export → Project / module / domain model JSON</strong> card
+            (<code>projects</code> → <code>modules</code> → <code>domain_models</code> — missing projects and modules are created,
+            existing ones with the same name are reused; a plain <code>domain_models</code> list works too — domains, attributes, types, cardinality, "integral"/"association" relations, and inline
             per-attribute <code>access</code> → <code>rbac</code> / <code>abac</code> rules),
             or upload a <code>.json</code> file. Domain models will be created and shown in the
             Domain Model tab.
@@ -137,7 +148,7 @@ export function ImportDomainModelModal({ open, onClose, onConfirm }: ImportDomai
               }}>
                 <CheckIcon sx={{ fontSize: 15 }} />
                 <span>
-                  Parsed <strong>{result.totalDomains}</strong> domain model(s), <strong>{result.totalAttributes}</strong> attribute(s)
+                  Parsed {result.totalProjects > 0 && <><strong>{result.totalProjects}</strong> project(s), <strong>{result.totalModules}</strong> module(s), </>}<strong>{result.totalDomains}</strong> domain model(s), <strong>{result.totalAttributes}</strong> attribute(s)
                   {Object.keys(result.domainAccess).length > 0
                     ? ` — domain-level access on ${Object.keys(result.domainAccess).length} domain(s)`
                     : ""}
@@ -157,6 +168,12 @@ export function ImportDomainModelModal({ open, onClose, onConfirm }: ImportDomai
                     <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 4 }}>
                       <StorageIcon sx={{ fontSize: 14, color: "#7e22ce" }} />
                       <strong style={{ fontSize: 13 }}>{d.name}</strong>
+                      {result.domainScopes[d.name]?.project && (
+                        <span style={{ fontSize: 11, color: "var(--color-text-secondary)" }}>
+                          {result.domainScopes[d.name].project}
+                          {result.domainScopes[d.name].module ? ` › ${result.domainScopes[d.name].module}` : ""}
+                        </span>
+                      )}
                       <span style={{ fontSize: 11, color: "var(--color-text-secondary)" }}>
                         {Object.keys(d.fields).length} field(s)
                       </span>

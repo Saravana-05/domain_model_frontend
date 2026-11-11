@@ -1,4 +1,5 @@
 import React, { useState } from "react";
+import { isValidEmail } from "../../schema/types";
 import { usePermission } from "../../components/Can";
 import { isPermissionError } from "../../api/permissionError";
 import AddIcon                   from "@mui/icons-material/Add";
@@ -38,6 +39,12 @@ export function DataTab({ schemas, dbBackends = {} }: { schemas: AllSchemas; dbB
 
   async function handleInsert() {
     if (!selectedDomain) return;
+    for (const [fieldName, fieldDef] of domainFields) {
+      if (fieldDef.type === "email" && !isValidEmail((formValues[fieldName] ?? "").trim())) {
+        setStatus({ state: "err", msg: `❌ "${fieldName}" must be a valid email address (e.g. name@example.com)` });
+        return;
+      }
+    }
     setStatus({ state: "loading", msg: "Inserting row…" });
     try {
       const row: Record<string, any> = {};
@@ -144,7 +151,7 @@ export function DataTab({ schemas, dbBackends = {} }: { schemas: AllSchemas; dbB
                         </select>
                       ) : (
                         <input
-                          type={fieldDef.type === "number" ? "number" : fieldDef.type === "date" ? "date" : "text"}
+                          type={fieldDef.type === "number" ? "number" : fieldDef.type === "date" ? "date" : fieldDef.type === "email" ? "email" : "text"}
                           className="si-data-input"
                           placeholder={isRelation ? `ID of related ${(fieldDef as any).relatedDomain ?? "record"}` : isList ? `Comma-separated IDs from ${(fieldDef as any).listDomain ?? "domain"}` : (ph || `Enter ${label}…`)}
                           value={formValues[fieldName] ?? ""} onChange={(e) => setField(fieldName, e.target.value)} />
