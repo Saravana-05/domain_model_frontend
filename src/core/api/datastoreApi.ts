@@ -36,6 +36,7 @@ export interface BackendSchemaField {
   cardinality?:  string;           // "list" = multi-value field
   relationKind?: string;           // "integral" | "association"
   relatedDomain?: string;          // the domain this field's relation points to
+  relatedDomains?: string[];       // several domains linked by ONE association field — the form shows a domain picker
   validationRefs?: string[];       // attached named validation-rule tags
   // Extended metadata stored via model_config extra: allow
   component?:    string;
@@ -50,9 +51,6 @@ export interface BackendSchemaField {
 
 export interface BackendCreateRequest {
   table_name: string;
-  /** Business name exactly as the user typed it (e.g. "Client Details").
-   *  `table_name` is the storage name (e.g. "ClientDetails"). */
-  label?:     string;
   schema:     BackendSchemaField[];
   db_backend?: "dynamodb" | "postgresql";
   versioned?: boolean;
@@ -86,8 +84,6 @@ export interface BackendCreateResponse {
 
 export interface BackendSchemaEntry {
   table_name: string;
-  /** Business name for the domain model (null/absent on older domains). */
-  label?:     string | null;
   schema:     BackendSchemaField[];
   db_backend?: "dynamodb" | "postgresql";
   versioned?: boolean;
@@ -218,15 +214,13 @@ export function domainToBackendRequest(params: {
   abacRules?:  Record<string, Record<string, any>>;   // full-path keys
   db_backend?: "dynamodb" | "postgresql";              // which DB to store data in
   versioned?:  boolean;                                 // enable version history for this domain
-  /** Business name of the domain model as typed (e.g. "Client Details"). */
-  label?:      string;
   /** Named validation registry, needed to resolve each field's
    *  validationRefs into real rules before sending — without this, a
    *  field that only has registry refs attached (no inline validations)
    *  would silently persist NO validations at all. */
   registry?: Record<string, any>;
 }): BackendCreateRequest {
-  const { domainName, label: domainLabel, fields, uiHints = {}, rbacRules = {}, abacRules = {}, db_backend, versioned, registry = {} } = params;
+  const { domainName, fields, uiHints = {}, rbacRules = {}, abacRules = {}, db_backend, versioned, registry = {} } = params;
 
   const schema: BackendSchemaField[] = Object.entries(fields).map(([fieldName, fieldDef]) => {
     const path = `${domainName}.${fieldName}`;
@@ -258,6 +252,9 @@ export function domainToBackendRequest(params: {
     // this, relationKind was saved but the target was silently dropped.
     // This is the save-side counterpart to backendSchemaToFrontend().
     if (fieldDef.relatedDomain) field.relatedDomain = fieldDef.relatedDomain;
+    // One association field linking SEVERAL domains: the column stores which
+    // one was chosen, and this list is what the form's picker offers.
+    if (fieldDef.relatedDomains && fieldDef.relatedDomains.length > 1) field.relatedDomains = fieldDef.relatedDomains;
 
     // Resolve registry-attached rules (validationRefs) into real, flat
     // rules the Form plugin can run. Inline validations alone were not
@@ -295,7 +292,6 @@ export function domainToBackendRequest(params: {
   });
 
   const req: BackendCreateRequest = { table_name: domainName, schema };
-  if (domainLabel && domainLabel.trim()) req.label = domainLabel.trim();
   if (db_backend) req.db_backend = db_backend;
   if (versioned !== undefined) req.versioned = versioned;
   return req;
@@ -309,13 +305,12 @@ export function backendSchemaToFrontend(entry: BackendSchemaEntry): {
   fields:     Record<string, {
     type: string; default?: any; datasource?: string;
     cardinality?: string; relationKind?: string;
-    relatedDomain?: string; validationRefs?: string[];
+    relatedDomain?: string; relatedDomains?: string[]; validationRefs?: string[];
   }>;
   uiHints:    Record<string, Record<string, any>>;
   rbacRules:  Record<string, Record<string, any>>;
   abacRules:  Record<string, Record<string, any>>;
   versioned:  boolean;
-  label?:     string;
 } {
   const { table_name, schema, versioned } = entry;
   const fields:    Record<string, any> = {};
@@ -336,6 +331,7 @@ export function backendSchemaToFrontend(entry: BackendSchemaEntry): {
       // downstream code (handleLoadFromBackend in SchemaInspector.tsx) reads
       // them off this returned object, so they must be passed through here.
       relatedDomain:  field.relatedDomain ?? undefined,
+      relatedDomains: field.relatedDomains ?? undefined,
       validationRefs: field.validationRefs ?? undefined,
     };
 
@@ -350,7 +346,7 @@ export function backendSchemaToFrontend(entry: BackendSchemaEntry): {
     if (field.abac && Object.keys(field.abac).length > 0) abacRules[path] = field.abac;
   }
 
-  return { domainName: table_name, label: entry.label ?? undefined, fields, uiHints, rbacRules, abacRules, versioned: !!versioned };
+  return { domainName: table_name, fields, uiHints, rbacRules, abacRules, versioned: !!versioned };
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -660,7 +656,7 @@ export async function apiDeleteDomain(
 /** PUT /datastore/schemas/{table} — rename a domain model and/or move it to another project/module */
 export async function apiUpdateDomain(
   tableName: string,
-  body: { new_table_name?: string; label?: string | null; project_id?: string | number | null; module_id?: string | number | null },
+  body: { new_table_name?: string; project_id?: string | number | null; module_id?: string | number | null },
 ): Promise<{ status: string; table_name?: string; old_name?: string }> {
   const res = await apiFetch(`/datastore/schemas/${encodeURIComponent(tableName)}`, {
     method: "PUT",
