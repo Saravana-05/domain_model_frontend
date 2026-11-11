@@ -326,7 +326,7 @@ export default function App() {
                   ].filter(Boolean).join("  ›  ")}
                 </p>
               </div>
-              <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+              <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
                 {inspectorTab === "domain" && (
                   <>
                     <ScopeFilter
@@ -394,7 +394,7 @@ export default function App() {
 }
 
 const styles: Record<string, React.CSSProperties> = {
-  sidebar:      { width: 260, background: "#2a2438", display: "flex", flexDirection: "column", flexShrink: 0 },
+  sidebar:      { width: "clamp(180px, 22vw, 260px)", background: "#2a2438", display: "flex", flexDirection: "column", flexShrink: 0 },
   brand:        { display: "flex", alignItems: "center", gap: 10, padding: "20px 16px", borderBottom: "1px solid rgba(255,255,255,0.08)" },
   brandIcon:    { fontSize: 22 },
   brandName:    { color: "#f5f3fa", fontWeight: 700, fontSize: 16 },
@@ -409,8 +409,8 @@ const styles: Record<string, React.CSSProperties> = {
   userName:     { color: "#f5f3fa", fontSize: 13, fontWeight: 600 },
   userRole:     { color: "#a78bfa", fontSize: 12 },
   logoutBtn:    { width: "100%", padding: "7px", borderRadius: 8, border: "1px solid rgba(255,255,255,0.15)", background: "transparent", color: "#b3abc7", fontSize: 13, cursor: "pointer" },
-  main:         { flex: 1, overflowY: "auto", background: "#2a2438" },
-  pageHeader:   { display: "flex", justifyContent: "space-between", alignItems: "flex-start", padding: "24px 32px 0" },
+  main:         { flex: 1, minWidth: 0, overflowY: "auto", overflowX: "auto", background: "#2a2438" },
+  pageHeader:   { display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: 12, padding: "24px clamp(12px, 3vw, 32px) 0" },
   pageTitle:    { fontSize: 22, fontWeight: 700, margin: 0, color: "#f5f3fa" },
   pageSub:      { margin: "4px 0 0", color: "#b3abc7", fontSize: 14 },
   badge:        { padding: "4px 10px", borderRadius: 20, background: "#332c42", color: "#b3abc7", fontSize: 12, fontWeight: 600 },

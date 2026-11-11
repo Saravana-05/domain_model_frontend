@@ -197,6 +197,7 @@ body {
 
 .si-card-header {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 12px;
   padding: 14px 20px;
@@ -1017,6 +1018,7 @@ body {
    edge, then a small fixed gap between the two buttons inside it. */
 .si-card-header-actions {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 8px;
   margin-left: auto;
