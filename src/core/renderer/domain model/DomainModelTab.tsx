@@ -23,10 +23,10 @@ import { ViewConfigForm } from "./ViewConfigForm";
 import { FieldBuilder } from "./FieldBuilder";
 import type { FieldDraft } from "./fieldDraftTypes";
 import type { QuickCreateField } from "./DomainPickers";
-import { buildDomainModelJson } from "./exportJson";
+import { buildDomainModelJson, isJunctionDomain } from "./exportJson";
 import { DomainJsonModal } from "./DomainJsonModal";
 import { DomainPermissionsPanel } from "./Domainpermissionspanel";
-import type { DomainPermissionRule } from "./DomainPermissionsPanel";
+import type { DomainPermissionRule } from "./Domainpermissionspanel";
 import { useProjectStore } from "../../store/projectStore";
 
 export interface DomainModelTabProps {
@@ -198,9 +198,8 @@ export function DomainModelTab({
         const fields     = schemas.domains[domainName].fields;
         const fieldNames = Object.keys(fields);
         const viewCfg    = viewConfigs[domainName] ?? {};
-        const isJunction = junctionDomains.has(domainName) &&
-          Object.keys(fields).length === 2 &&
-          Object.keys(fields).every((f) => f.endsWith("Id"));
+        const isJunction = junctionDomains.has(domainName) ||
+          isJunctionDomain(domainName, fields);
         const permRuleCount = permsFor(domainName).length;
 
         return (

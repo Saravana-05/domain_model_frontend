@@ -81,6 +81,8 @@ export interface CreateDomainPayload {
   junctionDomains?: DomainDefinition[];
   relatedDomains?:  DomainDefinition[];
   fieldLabels?: Record<string, Record<"en" | "ta" | "ar", string>>;
+  multiLinkTargets?: string[];
+  linkedTable?: string;
 }
 
 /** Snapshot of everything CreateDomainTab's local form state needs to
@@ -91,6 +93,8 @@ interface DomainDraft {
   dbBackend:      "postgresql" | "dynamodb";
   versioned:      boolean;
   expandedFields: Record<string, boolean>;
+  multiLinkEnabled: boolean;
+  multiLinkTargets: string[];
 }
 
 export function CreateDomainTab({ onAdd, registry = {}, domainNames = [], onQuickCreateDomain, schemas, initialDomainName, onRedirectToCreate, pendingFK, onAddValidationRule }: CreateDomainTabProps) {
@@ -106,6 +110,8 @@ export function CreateDomainTab({ onAdd, registry = {}, domainNames = [], onQuic
   const [generated,  setGenerated]  = useState(false);
   const [versioned, setVersioned] = useState(false);
   const [expandedFields, setExpandedFields] = useState<Record<string, boolean>>({});
+  const [multiLinkEnabled, setMultiLinkEnabled] = useState(false);
+  const [multiLinkTargets, setMultiLinkTargets] = useState<string[]>([]);
 
   // ── Project scoping — which Project this domain (and any related /
   //    junction domains created alongside it) is created under. Defaults
@@ -198,6 +204,8 @@ export function CreateDomainTab({ onAdd, registry = {}, domainNames = [], onQuic
     setGenerated(false);
     setVersioned(false);
     setExpandedFields({});
+    setMultiLinkEnabled(false);
+    setMultiLinkTargets([]);
     setActiveDraftId(null);
     setFormKey((k) => k + 1);
   }
@@ -208,7 +216,23 @@ export function CreateDomainTab({ onAdd, registry = {}, domainNames = [], onQuic
   // empty name or stray punctuation that wouldn't survive that reformat.
   const validName = /^[a-zA-Z0-9][a-zA-Z0-9 _-]*$/.test(domainName.trim());
   const hasFields = Object.keys(fields).length > 0;
-  const canCreate = validName && hasFields && status.state !== "loading";
+  const sourceDomainName = toPascalCase(domainName);
+  const hasTargetFieldConflict = (target: string, fieldNames: string[]) =>
+    fieldNames.some((fieldName) => fieldName.toLowerCase() === `${target}Id`.toLowerCase());
+  const multiLinkError = multiLinkEnabled
+    ? multiLinkTargets.length < 2
+      ? "Select at least two existing target domains for multi-domain linking."
+      : multiLinkTargets.some((target) => target === sourceDomainName)
+        ? "The new domain cannot be selected as a multi-link target."
+        : new Set(multiLinkTargets).size !== multiLinkTargets.length
+          ? "Each multi-link target can only be selected once."
+          : multiLinkTargets.some((target) => !domainNames.includes(target))
+            ? "Each multi-link target must be an existing domain."
+            : multiLinkTargets.some((target) => hasTargetFieldConflict(target, Object.keys(fields)))
+              ? "A selected target conflicts with an existing field name. Rename that field before creating the multi-link."
+              : ""
+    : "";
+  const canCreate = validName && hasFields && !multiLinkError && status.state !== "loading";
 
   // Compute which junction domains will be created (from relation fields)
   const pendingJunctions: Array<{ parent: string; related: string; junctionName: string }> = useMemo(() => {
@@ -269,7 +293,10 @@ export function CreateDomainTab({ onAdd, registry = {}, domainNames = [], onQuic
 
     setDrafts((prev) => ({
       ...prev,
-      [domainName]: { fields: fieldsWithCommitted, dbBackend, versioned, expandedFields },
+      [domainName]: {
+        fields: fieldsWithCommitted, dbBackend, versioned, expandedFields,
+        multiLinkEnabled, multiLinkTargets,
+      },
     }));
     setDraftOrder((prev) => [...prev.filter((n) => n !== domainName), domainName]);
 
@@ -279,6 +306,8 @@ export function CreateDomainTab({ onAdd, registry = {}, domainNames = [], onQuic
     setDbBackend(existing?.dbBackend ?? "postgresql");
     setVersioned(existing?.versioned ?? false);
     setExpandedFields(existing?.expandedFields ?? {});
+    setMultiLinkEnabled(existing?.multiLinkEnabled ?? false);
+    setMultiLinkTargets(existing?.multiLinkTargets ?? []);
     setGenerated(false);
     setStatus({ state: "idle", msg: "" });
   }
@@ -293,7 +322,7 @@ export function CreateDomainTab({ onAdd, registry = {}, domainNames = [], onQuic
     setDrafts((prev) => {
       const next = { ...prev };
       delete next[name];
-      next[domainName] = { fields, dbBackend, versioned, expandedFields };
+      next[domainName] = { fields, dbBackend, versioned, expandedFields, multiLinkEnabled, multiLinkTargets };
       return next;
     });
     setDraftOrder((prev) => [...prev.filter((n) => n !== name), domainName]);
@@ -303,12 +332,14 @@ export function CreateDomainTab({ onAdd, registry = {}, domainNames = [], onQuic
     setDbBackend(target.dbBackend);
     setVersioned(target.versioned);
     setExpandedFields(target.expandedFields);
+    setMultiLinkEnabled(target.multiLinkEnabled);
+    setMultiLinkTargets(target.multiLinkTargets);
     setGenerated(false);
     setStatus({ state: "idle", msg: "" });
   }
 
   function buildPayload(): CreateDomainPayload {
-    return buildPayloadFor(domainName, fields, dbBackend, versioned);
+    return buildPayloadFor(domainName, fields, dbBackend, versioned, {}, multiLinkEnabled ? multiLinkTargets : []);
   }
 
   /**
@@ -345,6 +376,7 @@ export function CreateDomainTab({ onAdd, registry = {}, domainNames = [], onQuic
     dbBackendArg: "postgresql" | "dynamodb",
     versionedArg: boolean,
     externalKnownFields: Record<string, Record<string, DomainFieldCore>> = {},
+    multiLinkTargetsArg: string[] = [],
   ): CreateDomainPayload {
     // Domain model names are stored PascalCase, however they were typed.
     const name = toPascalCase(rawName);
@@ -442,6 +474,19 @@ export function CreateDomainTab({ onAdd, registry = {}, domainNames = [], onQuic
       const abac = draftToABACRule(d);
       if (abac) abacRules[fp] = abac;
     }
+
+    for (const target of multiLinkTargetsArg) {
+      const fieldName = `${target}Id`;
+      domainFields[fieldName] = {
+        type: "relation",
+        relatedDomain: target,
+        relationKind: "association",
+        multiLink: true,
+        targetDomain: target,
+        isMarkerOnly: true,
+      } as any;
+      uiHints[`${name}.${fieldName}`] = { label: fieldName };
+    }
     if (versionedArg) {
       domainFields["isActive"]  = { type: "boolean", default: "true" };
       domainFields["fromDate"]  = { type: "date" };
@@ -462,7 +507,11 @@ export function CreateDomainTab({ onAdd, registry = {}, domainNames = [], onQuic
     const fieldLabels: Record<string, Record<"en" | "ta" | "ar", string>> = {};
     for (const [n, d] of Object.entries(fieldsArg)) fieldLabels[n] = d.labels;
 
-    return { domain: { name, fields: domainFields }, uiHints, rbacRules, abacRules, dbBackend: dbBackendArg, versioned: versionedArg, junctionDomains, relatedDomains, fieldLabels };
+    return {
+      domain: { name, fields: domainFields }, uiHints, rbacRules, abacRules,
+      dbBackend: dbBackendArg, versioned: versionedArg, junctionDomains,
+      relatedDomains, fieldLabels, multiLinkTargets: multiLinkTargetsArg,
+    };
   }
 
   /**
@@ -493,7 +542,7 @@ export function CreateDomainTab({ onAdd, registry = {}, domainNames = [], onQuic
     // keeps whatever name you actually typed.
     const backendFields: Record<string, DomainFieldCore> = Object.fromEntries(
       Object.entries(payload.domain.fields)
-        .filter(([, f]) => !(f.type === "relation" && (f as any).isMarkerOnly))
+        .filter(([, f]) => !(f.type === "relation" && (f as any).isMarkerOnly && !f.multiLink))
         .map(([k, f]) => [
           k, f.type === "relation" ? { ...f, type: "string" as FieldType } : f,
         ])
@@ -552,17 +601,19 @@ export function CreateDomainTab({ onAdd, registry = {}, domainNames = [], onQuic
    *  auto-created/merged related domains, any junction tables. Extracted
    *  so both the single "Create Domain" button and "Create All" can
    *  share it. */
-  async function createDomainFromPayload(payload: CreateDomainPayload): Promise<string[]> {
+  async function createDomainFromPayload(payload: CreateDomainPayload): Promise<{ messages: string[]; linkedTable?: string }> {
     const messages: string[] = [];
+    let linkedTable: string | undefined;
 
     for (const { label, req } of buildBackendRequests(payload)) {
       try {
         const res = await apiCreateDomain(req);
         if (res.status === "success") {
+          if (label === "Main table") linkedTable = res.linked_table;
           const action = res.table_created ? "created" : "already existed";
           messages.push(
             label === "Main table"
-              ? `✅ "${res.table_name}" ${action} in ${dbLocation(res)}`
+              ? `✅ "${res.table_name}" ${action} in ${dbLocation(res)}${res.linked_table ? ` · linked table "${res.linked_table}"` : ""}`
               : `✅ ${label} ${action}`,
           );
         } else {
@@ -573,7 +624,10 @@ export function CreateDomainTab({ onAdd, registry = {}, domainNames = [], onQuic
       }
     }
 
-    return messages;
+    if (payload.multiLinkTargets?.length && !linkedTable) {
+      messages.push("❌ Multi-domain link creation did not return the generated linked_table.");
+    }
+    return { messages, linkedTable };
   }
 
   async function createDomain() {
@@ -581,10 +635,15 @@ export function CreateDomainTab({ onAdd, registry = {}, domainNames = [], onQuic
     setStatus({ state: "loading", msg: "Creating tables in database..." });
 
     const payload = buildPayload();
-    const messages = await createDomainFromPayload(payload);
-
-    onAdd(payload);
+    const result = await createDomainFromPayload(payload);
+    const messages = result.messages;
     const hasErr = messages.some((m) => m.startsWith("❌") || m.startsWith("⚠️"));
+    if (payload.multiLinkTargets?.length && hasErr) {
+      setStatus({ state: "err", msg: messages.join(" · ") });
+      return;
+    }
+
+    onAdd({ ...payload, linkedTable: result.linkedTable });
     setStatus({
       state: hasErr ? "err" : "ok",
       msg: messages.join(" · "),
@@ -635,13 +694,42 @@ export function CreateDomainTab({ onAdd, registry = {}, domainNames = [], onQuic
   async function createAllDomains() {
     if (!canCreate) return;
 
-    const chain: Array<{ name: string; fields: Record<string, FieldDraft>; dbBackend: "postgresql" | "dynamodb"; versioned: boolean }> = [
-      { name: toPascalCase(domainName), fields, dbBackend, versioned },
+    const chain: Array<{
+      name: string; fields: Record<string, FieldDraft>;
+      dbBackend: "postgresql" | "dynamodb"; versioned: boolean;
+      multiLinkEnabled: boolean; multiLinkTargets: string[];
+    }> = [
+      {
+        name: toPascalCase(domainName), fields, dbBackend, versioned,
+        multiLinkEnabled, multiLinkTargets,
+      },
       ...draftOrder.slice().reverse().map((n) => {
         const d = drafts[n]!;
-        return { name: toPascalCase(n), fields: d.fields, dbBackend: d.dbBackend, versioned: d.versioned };
+        return {
+          name: toPascalCase(n), fields: d.fields, dbBackend: d.dbBackend,
+          versioned: d.versioned, multiLinkEnabled: d.multiLinkEnabled,
+          multiLinkTargets: d.multiLinkTargets,
+        };
       }),
     ];
+
+    const invalidMultiLinkUnit = chain.find((unit) =>
+      unit.multiLinkEnabled &&
+      (unit.multiLinkTargets.length < 2 ||
+        new Set(unit.multiLinkTargets).size !== unit.multiLinkTargets.length ||
+        unit.multiLinkTargets.some((target) =>
+          target === unit.name ||
+          !domainNames.includes(target) ||
+          hasTargetFieldConflict(target, Object.keys(unit.fields)),
+        )),
+    );
+    if (invalidMultiLinkUnit) {
+      setStatus({
+        state: "err",
+        msg: `${invalidMultiLinkUnit.name}: multi-domain linking requires at least two distinct existing targets, none of which is the source domain or conflicts with an existing field.`,
+      });
+      return;
+    }
 
     setStatus({ state: "loading", msg: `Creating ${chain.length} domain(s): ${chain.map((c) => c.name).join(" → ")}...` });
 
@@ -650,10 +738,17 @@ export function CreateDomainTab({ onAdd, registry = {}, domainNames = [], onQuic
     let anyErr = false;
 
     for (const unit of chain) {
-      const payload = buildPayloadFor(unit.name, unit.fields, unit.dbBackend, unit.versioned, knownFieldsMap);
-      const messages = await createDomainFromPayload(payload);
+      const payload = buildPayloadFor(
+        unit.name, unit.fields, unit.dbBackend, unit.versioned, knownFieldsMap,
+        unit.multiLinkEnabled ? unit.multiLinkTargets : [],
+      );
+      const result = await createDomainFromPayload(payload);
+      const messages = result.messages;
       allMessages.push(`${unit.name}: ${messages.join(" · ")}`);
-      onAdd(payload);
+      const errored = messages.some((m) => m.startsWith("❌") || m.startsWith("⚠️"));
+      if (!(payload.multiLinkTargets?.length && errored)) {
+        onAdd({ ...payload, linkedTable: result.linkedTable });
+      }
 
       // Record what this unit's own table ended up with, plus anything
       // it merged into OTHER (related) domains, so later units in the
@@ -663,7 +758,6 @@ export function CreateDomainTab({ onAdd, registry = {}, domainNames = [], onQuic
         knownFieldsMap[rd.name] = { ...(knownFieldsMap[rd.name] ?? {}), ...rd.fields };
       }
 
-      const errored = messages.some((m) => m.startsWith("❌") || m.startsWith("⚠️"));
       if (errored) {
         anyErr = true;
         break;
@@ -708,7 +802,7 @@ export function CreateDomainTab({ onAdd, registry = {}, domainNames = [], onQuic
    *  (replayed locally after submit so UI hints / RBAC / ABAC / labels
    *  land as they would have), and the create-requests themselves. */
   async function saveDraft() {
-    if (!validName || !hasFields) return;
+    if (!validName || !hasFields || multiLinkError) return;
     setStatus({ state: "loading", msg: "Saving draft..." });
 
     const payload = buildPayload();
@@ -744,6 +838,9 @@ export function CreateDomainTab({ onAdd, registry = {}, domainNames = [], onQuic
     setFields((p.fields ?? {}) as Record<string, FieldDraft>);
     setDbBackend((p.db_backend as "postgresql" | "dynamodb") ?? "postgresql");
     setVersioned(!!p.versioned);
+    const savedPayload = p.payload as CreateDomainPayload | undefined;
+    setMultiLinkEnabled(!!savedPayload?.multiLinkTargets?.length);
+    setMultiLinkTargets(savedPayload?.multiLinkTargets ?? []);
     setExpandedFields({});
     if (!projectLocked) setSelectedProjectId(draft.project_id ?? null);
     if (!moduleLocked)  setSelectedModuleId(draft.module_id ?? null);
@@ -764,18 +861,29 @@ export function CreateDomainTab({ onAdd, registry = {}, domainNames = [], onQuic
       const results = res.results ?? [];
       const made = results.map((r) =>
         r.status === "success"
-          ? `✅ "${r.table_name}" ${r.created ? "created" : "already existed"}`
+          ? `✅ "${r.table_name}" ${r.created ? "created" : "already existed"}${r.linked_table ? ` · linked table "${r.linked_table}"` : ""}`
           : `❌ "${r.table_name}": ${r.message}`
       );
 
       const storedPayload = (draft.payload as any)?.payload as CreateDomainPayload | undefined;
-      if (storedPayload) onAdd(storedPayload);
+      const linkedTable = res.linked_table ?? results.find((result) => result.linked_table)?.linked_table;
+      const multiLinkFailed = !!storedPayload?.multiLinkTargets?.length &&
+        (results.some((result) => result.status !== "success") || !linkedTable);
+      if (multiLinkFailed) {
+        setStatus({
+          state: "err",
+          msg: [...made, ...(!linkedTable ? ["❌ Multi-domain link creation did not return the generated linked_table."] : [])].join(" · "),
+        });
+        await refreshSavedDrafts();
+        return;
+      }
+      if (storedPayload) onAdd({ ...storedPayload, linkedTable });
 
       await refreshSavedDrafts();
       if (activeDraftId === draft.id) {
         resetForm();
       }
-      setStatus({ state: "ok", msg: made.join(" · ") });
+      setStatus({ state: made.some((message) => message.startsWith("❌")) ? "err" : "ok", msg: made.join(" · ") });
     } catch (err: any) {
       setStatus({ state: "err", msg: `❌ Submit failed: ${err?.message ?? String(err)}` });
     }
@@ -981,7 +1089,13 @@ export function CreateDomainTab({ onAdd, registry = {}, domainNames = [], onQuic
               <input
                 className={`si-form-input ${domainName && !validName ? "si-form-input--error" : ""}`}
                 value={domainName}
-                onChange={(e) => { setDomainName(e.target.value); setStatus({ state: "idle", msg: "" }); setGenerated(false); }}
+                onChange={(e) => {
+                  const nextName = toPascalCase(e.target.value);
+                  setDomainName(e.target.value);
+                  setMultiLinkTargets((previous) => previous.filter((target) => target !== nextName));
+                  setStatus({ state: "idle", msg: "" });
+                  setGenerated(false);
+                }}
                 onBlur={() => { if (domainName.trim()) setDomainName(toPascalCase(domainName)); }}
                 placeholder="product" />
             </label>
@@ -1006,6 +1120,52 @@ export function CreateDomainTab({ onAdd, registry = {}, domainNames = [], onQuic
                 <strong>Enable Versioning</strong>
               </span>
             </label>
+          </div>
+          <div style={{ marginTop: 12 }}>
+            <label style={{ display: "flex", alignItems: "center", gap: 8, fontWeight: 600, fontSize: 13 }}>
+              <input
+                type="checkbox"
+                checked={multiLinkEnabled}
+                onChange={(e) => {
+                  setMultiLinkEnabled(e.target.checked);
+                  setStatus({ state: "idle", msg: "" });
+                }}
+              />
+              Enable multi-domain linking
+            </label>
+            {multiLinkEnabled && (
+              <div style={{ marginTop: 8, paddingLeft: 24 }}>
+                <div className="si-hint" style={{ marginBottom: 6 }}>
+                  Choose at least two existing domains. The backend creates one combined junction table.
+                </div>
+                <div style={{ display: "flex", flexWrap: "wrap", gap: "6px 16px" }}>
+                  {Array.from(new Set(domainNames))
+                    .filter((target) => target !== sourceDomainName)
+                    .map((target) => (
+                      <label key={target} style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: 12 }}>
+                        <input
+                          type="checkbox"
+                          checked={multiLinkTargets.includes(target)}
+                          onChange={(e) => {
+                            const checked = e.target.checked;
+                            setMultiLinkTargets((previous) =>
+                              checked
+                                ? [...previous.filter((name) => name !== target), target]
+                                : previous.filter((name) => name !== target),
+                            );
+                            setStatus({ state: "idle", msg: "" });
+                          }}
+                        />
+                        {target}
+                      </label>
+                    ))}
+                </div>
+                {multiLinkError && <div className="si-inline-error" style={{ marginTop: 6 }}>{multiLinkError}</div>}
+                {domainNames.filter((target) => target !== sourceDomainName).length === 0 && (
+                  <div className="si-inline-error" style={{ marginTop: 6 }}>No existing target domains are available.</div>
+                )}
+              </div>
+            )}
           </div>
         </div>
 

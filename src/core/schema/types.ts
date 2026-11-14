@@ -145,6 +145,10 @@ export interface DomainFieldCore {
    * Acts like a foreign-key pointer to another domain model.
    */
   relatedDomain?:   string;
+  /** Backend multi-domain association marker; never a source-table column. */
+  multiLink?:       boolean;
+  /** Exact backend table name used by a multi-domain association marker. */
+  targetDomain?:    string;
   /**
    * Only meaningful for FK relation fields pointing at an EXISTING domain
    * (the "belongs-to" case, e.g. branch.clinicId → clinic). Tags whether
@@ -300,6 +304,8 @@ export interface DomainFieldDef {
   computed?:      boolean;
   format?:        FieldFormat;
   relatedDomain?: string;
+  multiLink?:     boolean;
+  targetDomain?:  string;
   listDomain?:    string;
   /**
    * For "relation" fields — mirrors DomainFieldCore.cardinality. Added so

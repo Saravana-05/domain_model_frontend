@@ -25,7 +25,8 @@ import { toPascalCase, toCamelCase } from "../../schema/casting";
 //     "cardinality": "one" | "many",
 //     "related_domain_model"?: { "linked_to": "VehicleModel",
 //                                "relationship_type": "integral" | "association",
-//                                "owned_by": "Manufacturer" | "NA" }
+//                                "owned_by": "Manufacturer" | "NA",
+//                                "multi_link"?: true }
 //                             (legacy shapes below are still accepted)
 //                             { "kind": "association", "linked_with": "clinic" }
 //                             | { "kind": "integral",    "part_of":    "clinic" }
@@ -118,7 +119,7 @@ function extractDomainModelsArray(parsed: any): any[] {
 }
 
 type RelationRole = "association" | "parent" | "child" | "synthesized";
-interface NormalizedRelation { role: RelationRole; related: string }
+interface NormalizedRelation { role: RelationRole; related: string; multiLink?: boolean }
 
 /**
  * Normalizes every supported related_domain_model shape into a role:
@@ -150,10 +151,11 @@ function normalizeRelation(domainName: string, attr: any, relation: any): Normal
   // ── current ──
   const linkedTo = typeof relation.linked_to === "string" ? relation.linked_to.trim() : "";
   if (!linkedTo) return null;
-  const related = toPascalCase(linkedTo);
+  const multiLink = relation.multi_link === true;
+  const related = multiLink ? linkedTo : toPascalCase(linkedTo);
   const type = String(relation.relationship_type ?? "").toLowerCase();
 
-  if (type === "association") return { role: "association", related };
+  if (type === "association") return { role: "association", related, multiLink };
   if (type === "integral") {
     const ownerRaw = typeof relation.owned_by === "string" ? relation.owned_by.trim() : "";
     const owner = ownerRaw && ownerRaw.toUpperCase() !== "NA" ? toPascalCase(ownerRaw) : "";
@@ -302,7 +304,12 @@ export function parseDomainModelImport(raw: string): DomainModelImportResult {
         field.relationKind = relation.role === "association" ? "association" : "integral";
         if (relation.role === "parent") parentLinks.push({ parent: domainName, child: relation.related });
         if (relation.role === "child") childFkDomains.add(`${domainName}->${relation.related}`);
-        if (relation.role === "association") associations.push({ a: domainName, b: relation.related });
+        if (relation.role === "association" && relation.multiLink) {
+          field.multiLink = true;
+          field.targetDomain = relation.related;
+        } else if (relation.role === "association") {
+          associations.push({ a: domainName, b: relation.related });
+        }
       } else if (rawRelation) {
         warnings.push({ domain: domainName, attribute: attributeId, message: `Unrecognized related_domain_model shape — relation dropped: ${JSON.stringify(rawRelation)}` });
       }

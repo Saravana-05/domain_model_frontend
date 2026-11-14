@@ -33,6 +33,8 @@ export interface BackendSchemaField {
   cardinality?:  string;           // "list" = multi-value field
   relationKind?: string;           // "integral" | "association"
   relatedDomain?: string;          // the domain this field's relation points to
+  multi_link?: boolean;
+  target_domain?: string;
   validationRefs?: string[];       // attached named validation-rule tags
   // Extended metadata stored via model_config extra: allow
   component?:    string;
@@ -74,6 +76,7 @@ export interface BackendCreateResponse {
   total_fields?: number;
   columns?:      { field_id: string; label: string; type: string }[];
   versioned?:    boolean;
+  linked_table?: string;
   message?:      string;
 }
 
@@ -244,6 +247,10 @@ export function domainToBackendRequest(params: {
     // this, relationKind was saved but the target was silently dropped.
     // This is the save-side counterpart to backendSchemaToFrontend().
     if (fieldDef.relatedDomain) field.relatedDomain = fieldDef.relatedDomain;
+    if (fieldDef.multiLink) {
+      field.multi_link = true;
+      field.target_domain = fieldDef.targetDomain ?? fieldDef.relatedDomain;
+    }
 
     // Resolve registry-attached rules (validationRefs) into real, flat
     // rules the Form plugin can run. Inline validations alone were not
@@ -320,6 +327,8 @@ export function backendSchemaToFrontend(entry: BackendSchemaEntry): {
       // them off this returned object, so they must be passed through here.
       relatedDomain:  field.relatedDomain ?? undefined,
       validationRefs: field.validationRefs ?? undefined,
+      multiLink:      field.multi_link ?? undefined,
+      targetDomain:   field.target_domain ?? undefined,
     };
 
     const ui: Record<string, any> = {};
@@ -383,8 +392,9 @@ export interface BackendSubmitDraftResponse {
   status:       string;
   draft_id:     string;
   domain_name?: string;
+  linked_table?: string;
   submitted_at?: string;
-  results?:     { table_name: string; created?: boolean; status: string; message?: string }[];
+  results?:     { table_name: string; created?: boolean; status: string; message?: string; linked_table?: string }[];
   message?:     string;
 }
 

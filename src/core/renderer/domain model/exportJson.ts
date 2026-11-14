@@ -25,6 +25,7 @@ export interface ExportedRelation {
   linked_to: string;
   relationship_type: "association" | "integral";
   owned_by: string;
+  multi_link?: boolean;
 }
 
 /** One ABAC rule: { name, effect, roles, conditions? } — no ids, no actions, no fields. */
@@ -88,15 +89,15 @@ export function pluralize(word: string): string {
   return `${word}s`;
 }
 
-/** Junction tables (`A_B` with exactly the two FK columns `AId` and `BId`)
- *  are an implementation detail of associations — recreated on import — so
- *  they're left out of the export. */
-function isJunctionDomain(name: string, fields: Record<string, any>): boolean {
+/** Junction tables (`A_B` or `A_B_C`, with one `<Domain>Id` field per
+ *  table-name segment) are implementation details of associations —
+ *  recreated on import — so they're left out of the export. */
+export function isJunctionDomain(name: string, fields: Record<string, any>): boolean {
   const keys = Object.keys(fields);
-  if (keys.length !== 2 || !name.includes("_")) return false;
-  const [a, ...rest] = name.split("_");
-  const b = rest.join("_");
-  return keys.includes(`${a}Id`) && keys.includes(`${b}Id`);
+  const domains = name.split("_");
+  if (domains.length < 2 || keys.length !== domains.length) return false;
+  const expected = new Set(domains.map((domain) => `${domain}Id`.toLowerCase()));
+  return keys.every((field) => expected.has(field.toLowerCase()));
 }
 
 /** A child-side integral FK is a single-valued "xId" field; the parent-side
@@ -109,6 +110,7 @@ function isChildFk(fieldName: string, fieldDef: any): boolean {
  *  survives (the backend doesn't persist relatedDomain, so after a reload a
  *  FK like manufacturerId is a plain string with relationKind "integral"). */
 function resolveRelatedDomain(fieldName: string, fieldDef: any, allDomains: AllSchemas["domains"]): string {
+  if (fieldDef.targetDomain) return fieldDef.targetDomain;
   if (fieldDef.relatedDomain) return fieldDef.relatedDomain;
   if (fieldName.endsWith("Id")) {
     const stem = fieldName.slice(0, -2).toLowerCase();
@@ -176,7 +178,12 @@ export function buildDomainModelJson(
       };
       const relatedDomain = resolveRelatedDomain(fieldName, fieldDef, schemas.domains);
       if (relationKind === "association") {
-        out.related_domain_model = { linked_to: relatedDomain, relationship_type: "association", owned_by: "NA" };
+        out.related_domain_model = {
+          linked_to: relatedDomain,
+          relationship_type: "association",
+          owned_by: "NA",
+          ...(fieldDef.multiLink ? { multi_link: true } : {}),
+        };
       } else if (relationKind === "integral") {
         // Child side (real stored FK): owner is the related domain.
         // Parent side (explicit to-many attribute): owner is this domain.

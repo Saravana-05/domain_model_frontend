@@ -154,6 +154,8 @@ export function buildSchemas(input: BuildSchemasInput): AllSchemas {
       if (fieldDef.relatedDomain) {
         fieldEntry.relatedDomain = fieldDef.relatedDomain;
       }
+      if (fieldDef.multiLink) fieldEntry.multiLink = true;
+      if (fieldDef.targetDomain) fieldEntry.targetDomain = fieldDef.targetDomain;
       if (fieldDef.type === "list" && fieldDef.listDomain) {
         fieldEntry.listDomain = fieldDef.listDomain;
       }

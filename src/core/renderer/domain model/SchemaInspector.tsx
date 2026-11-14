@@ -383,7 +383,8 @@ async function handleQuickCreateDomain(name: string, fields: QuickCreateField[])
     // Persist relation markers (display-only, e.g. a "domain model" typed
     // field whose fkFieldName differs from the literal field name).
     for (const [fieldName, fieldDef] of Object.entries(domainFields)) {
-      if (fieldDef.type === "relation" && fieldDef.relatedDomain && fieldName !== `${fieldDef.relatedDomain}Id`) {
+      if (fieldDef.type === "relation" && fieldDef.relatedDomain &&
+          (fieldDef.multiLink || fieldName !== `${fieldDef.relatedDomain}Id`)) {
         saveRelationMarker(name, fieldName, fieldDef);
       }
     }
@@ -480,13 +481,15 @@ async function handleQuickCreateDomain(name: string, fields: QuickCreateField[])
 
     let created = 0;
     let failed = 0;
+    const importErrors: string[] = [];
     for (const domain of result.domains) {
-      // Display-only relation markers (parent-side integral links and
-      // associations) never become columns, but a child's real FK does —
-      // send it as a plain string column, like everywhere else in this file.
+      // Display-only relation markers never become columns. Multi-link
+      // markers are submitted for backend junction generation; a child's
+      // real FK is sent as a plain string column.
       const backendFields = Object.fromEntries(
         Object.entries(domain.fields)
-          .filter(([, f]) => f.type !== "relation" || (f.relationKind === "integral" && f.cardinality !== "list" && !!f.relatedDomain))
+          .filter(([, f]) => f.type !== "relation" || f.multiLink ||
+            (f.relationKind === "integral" && f.cardinality !== "list" && !!f.relatedDomain))
           .map(([k, f]) => [k, f.type === "relation" ? { ...f, type: "string" as FieldType } : f])
       );
       if (Object.keys(backendFields).length === 0) continue;
@@ -501,9 +504,47 @@ async function handleQuickCreateDomain(name: string, fields: QuickCreateField[])
           db_backend: "postgresql",
         });
         const res = await apiCreateDomain(req);
-        if (res.status === "success") created++; else failed++;
-      } catch {
+        if (res.status === "success") {
+          created++;
+          const targets = Object.values(domain.fields)
+            .filter((field) => field.multiLink)
+            .map((field) => field.targetDomain ?? field.relatedDomain)
+            .filter((target): target is string => !!target);
+          if (targets.length && !res.linked_table) {
+            failed++;
+            importErrors.push(`${domain.name}: multi-domain link creation did not return the generated linked_table.`);
+          }
+          if (res.linked_table && targets.length) {
+            const junction: DomainDefinition = {
+              name: res.linked_table,
+              fields: Object.fromEntries(
+                [`${domain.name}Id`, ...targets.map((target) => `${target}Id`)]
+                  .map((fieldName) => [fieldName, { type: "string" as FieldType }]),
+              ),
+            };
+            setExtra((prev) => ({
+              ...prev,
+              newDomains: [...prev.newDomains.filter((entry) => entry.name !== junction.name), junction],
+              dbBackends: { ...prev.dbBackends, [junction.name]: "postgresql" },
+              projectIds: currentProjectId
+                ? { ...prev.projectIds, [junction.name]: currentProjectId }
+                : prev.projectIds,
+              moduleIds: currentModuleId
+                ? { ...prev.moduleIds, [junction.name]: currentModuleId }
+                : prev.moduleIds,
+            }));
+          }
+        } else {
+          failed++;
+          if (Object.values(domain.fields).some((field) => field.multiLink)) {
+            importErrors.push(`${domain.name}: ${res.message ?? "backend rejected multi-domain linking"}`);
+          }
+        }
+      } catch (err: any) {
         failed++;
+        if (Object.values(domain.fields).some((field) => field.multiLink)) {
+          importErrors.push(`${domain.name}: ${err?.message ?? String(err)}`);
+        }
       }
     }
     // Association links → junction tables.
@@ -521,9 +562,10 @@ async function handleQuickCreateDomain(name: string, fields: QuickCreateField[])
         (acc.warnings.length ? ` (${acc.warnings.length} warning(s): ${acc.warnings[0]})` : "");
     }
     setBackendLoadStatus(
-      `✅ Imported ${result.totalDomains} domain model(s), ${result.totalAttributes} attribute(s)` +
+      `${importErrors.length ? "⚠️" : "✅"} Imported ${result.totalDomains} domain model(s), ${result.totalAttributes} attribute(s)` +
       (result.skippedSynthesized ? ` (${result.skippedSynthesized} synthesized attribute(s) skipped)` : "") +
       (failed ? ` — ${created} table(s) saved to backend, ${failed} failed (still available locally).` : ` — saved to backend.`) +
+      (importErrors.length ? ` Multi-link errors: ${importErrors.join("; ")}` : "") +
       accessNote
     );
     setTimeout(() => setBackendLoadStatus(null), 6000);
@@ -1111,7 +1153,21 @@ function handleDomainCreated(payload: CreateDomainPayload) {
         }
       }
       const newRelatedDomains = (payload as any).relatedDomains ?? [];
-      const allNew = [payload.domain, ...newRelatedDomains, ...newJunctionDomains];
+      const linkedJunction = payload.linkedTable && payload.multiLinkTargets?.length
+        ? {
+            name: payload.linkedTable,
+            fields: Object.fromEntries(
+              [`${payload.domain.name}Id`, ...payload.multiLinkTargets.map((target) => `${target}Id`)]
+                .map((fieldName) => [fieldName, { type: "string" as FieldType }]),
+            ),
+          } satisfies DomainDefinition
+        : null;
+      const allNew = [
+        payload.domain,
+        ...newRelatedDomains,
+        ...newJunctionDomains,
+        ...(linkedJunction ? [linkedJunction] : []),
+      ];
        return {
         ...prev,
         newDomains: [
@@ -1439,6 +1495,8 @@ function handleViewConfig(domainName: string, cfg: DomainViewConfig) {
                 default: v.default,
                 datasource: v.datasource,
                 relationKind: (v as any).relationKind,
+                multiLink: (v as any).multiLink,
+                targetDomain: (v as any).targetDomain,
                 // relatedDomain and cardinality were both missing from this
                 // whitelist — every relation field's related domain and
                 // every list field's cardinality silently reverted to
