@@ -4,6 +4,7 @@ import AddIcon from "@mui/icons-material/Add";
 import PersonAddAltIcon from "@mui/icons-material/PersonAddAlt";
 import FileDownloadOutlinedIcon from "@mui/icons-material/FileDownloadOutlined";
 import FileUploadOutlinedIcon from "@mui/icons-material/FileUploadOutlined";
+import SearchIcon from "@mui/icons-material/Search";
 import {
   apiListRoles,
   apiCreateRole,
@@ -73,6 +74,66 @@ const cloneGrants = (g: Grants): Grants => {
   for (const [k, v] of Object.entries(g)) out[k] = new Set(v);
   return out;
 };
+
+/** Case-insensitive "does any of these texts contain the query" */
+const matches = (q: string, ...texts: (string | undefined)[]) => {
+  const n = q.trim().toLowerCase();
+  return !n || texts.some((t) => (t ?? "").toLowerCase().includes(n));
+};
+
+/** Items grouped Project > Module (input must already be sorted by project, module) */
+interface Group<T> { project: string; count: number; modules: { module?: string; items: T[] }[] }
+function groupItems<T>(items: T[], key: (t: T) => { project: string; module?: string }): Group<T>[] {
+  const out: Group<T>[] = [];
+  for (const it of items) {
+    const k = key(it);
+    let g = out.find((x) => x.project === k.project);
+    if (!g) { g = { project: k.project, count: 0, modules: [] }; out.push(g); }
+    let m = g.modules.find((x) => x.module === k.module);
+    if (!m) { m = { module: k.module, items: [] }; g.modules.push(m); }
+    m.items.push(it); g.count++;
+  }
+  return out;
+}
+const NO_PROJECT = "No project";
+/** RBAC resources for published pages are named page:<slug> */
+const isPageRes = (name: string) => name.toLowerCase().startsWith("page:");
+const sortBySource = (names: string[], sources: Record<string, SchemaSource>) =>
+  [...names].sort((a, b) => {
+    const sa = sources[a.toLowerCase()], sb = sources[b.toLowerCase()];
+    return `${sa?.project ?? "~"}|${sa?.module ?? "~"}|${a}`.localeCompare(`${sb?.project ?? "~"}|${sb?.module ?? "~"}|${b}`);
+  });
+
+/** Search input with a magnifier icon and a clear button */
+function SearchBox({ value, onChange, placeholder, style }: {
+  value: string; onChange: (v: string) => void; placeholder: string; style?: CSSProperties;
+}) {
+  return (
+    <div style={{ position: "relative", flex: "0 1 260px", minWidth: 180, marginLeft: "auto", ...style }}>
+      <SearchIcon
+        sx={{ fontSize: 15, position: "absolute", left: 9, top: "50%", transform: "translateY(-50%)", color: c.textMuted, pointerEvents: "none" }}
+      />
+      <input
+        type="text"
+        aria-label={placeholder}
+        style={{ ...common.input, width: "100%", boxSizing: "border-box", height: 32, padding: `0 ${value ? 26 : 10}px 0 30px`, fontSize: 13 }}
+        placeholder={placeholder}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+      />
+      {value && (
+        <button
+          type="button"
+          aria-label="Clear search"
+          onClick={() => onChange("")}
+          style={{ position: "absolute", right: 6, top: "50%", transform: "translateY(-50%)", background: "transparent", border: "none", color: c.textMuted, cursor: "pointer", fontSize: 12, lineHeight: 1, padding: 4 }}
+        >
+          ✕
+        </button>
+      )}
+    </div>
+  );
+}
 
 function useIsNarrow(bp = 900) {
   const [narrow, setNarrow] = useState(() => window.innerWidth < bp);
@@ -454,6 +515,7 @@ function PermissionsTab({
 }) {
   const narrow = useIsNarrow();
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
+  const [q, setQ] = useState("");
   const [activeRoleId, setActiveRoleId] = useState<string>(roles[0]?.id ?? "");
 
   useEffect(() => {
@@ -471,7 +533,13 @@ function PermissionsTab({
   const orphanRows = resources
     .filter((r) => !schemaNames.some((n) => n.toLowerCase() === r.name.toLowerCase()))
     .map((r) => ({ key: `o:${r.id}`, name: r.name, res: r as Resource | undefined, orphan: true }));
-  const rows: { key: string; name: string; res?: Resource; orphan?: boolean }[] = [...schemaRows, ...orphanRows];
+  const allRows: { key: string; name: string; res?: Resource; orphan?: boolean }[] = [...schemaRows, ...orphanRows];
+  // search: resource name, project, module or datastore table
+  const matchName = (name: string, orphan = false) => {
+    const src = orphan ? undefined : sources[name.toLowerCase()];
+    return matches(q, name, src?.project, src?.module, src?.table);
+  };
+  const rows = allRows.filter((r) => matchName(r.name, r.orphan));
 
   if (roles.length === 0)
     return (
@@ -479,7 +547,7 @@ function PermissionsTab({
         No roles yet. Use <strong style={{ color: c.text }}>Add Role</strong> above to create one.
       </div>
     );
-  if (rows.length === 0)
+  if (allRows.length === 0)
     return (
       <div style={common.empty}>
         No domain models or resources yet. Create domain models first, then sync them in the{" "}
@@ -492,23 +560,12 @@ function PermissionsTab({
 
   const colTemplate = `300px repeat(${roles.length}, minmax(110px, 1fr))`;
   const activeRole = roles.find((r) => r.id === activeRoleId);
-
-  return (
-    <>
-      {!narrow ? (
-        <div style={s.matrixWrap}>
-          {/* sticky header */}
-          <div style={{ ...s.matrixHead, gridTemplateColumns: colTemplate }}>
-            <div style={s.colLabel}>Resource / Action</div>
-            {roles.map((r) => (
-              <div key={r.id} style={{ textAlign: "center", padding: "0 4px" }}>
-                <div style={s.roleHead} title={r.description}>{r.name}</div>
-                <div style={s.roleCount}>{countEnabled(r.id)}/{allPermIds.length}</div>
-              </div>
-            ))}
-          </div>
-
-          {rows.map((row) => {
+  const tree = groupItems(rows, (r) => {
+    if (r.orphan) return { project: isPageRes(r.name) ? "Pages" : "Custom resources" };
+    const src = sources[r.name.toLowerCase()];
+    return { project: src?.project ?? NO_PROJECT, module: src?.module };
+  });
+  const renderRow = (row: (typeof allRows)[number]) => {
             if (!row.res) {
               // domain model that has no RBAC resource yet
               return (
@@ -570,7 +627,106 @@ function PermissionsTab({
                 ))}
               </div>
             );
-          })}
+  };
+
+  const groupOpen = (k: string) => (q.trim() ? true : !collapsed[k]);
+  const resIds = (items: (typeof allRows)) => items.flatMap((r) => r.res?.permissions.map((p) => p.id) ?? []);
+
+  const renderGroup = (g: Group<(typeof allRows)[number]>) => {
+    const pk = `p:${g.project}`;
+    const pIds = resIds(g.modules.flatMap((m) => m.items));
+    return (
+      <div key={pk}>
+        <div style={{ ...s.projRow, gridTemplateColumns: colTemplate }} onClick={() => toggleCollapse(pk)}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
+            <span style={s.caret}>{groupOpen(pk) ? "▼" : "▶"}</span>
+            <span style={s.projName}>{g.project}</span>
+            <span style={s.groupCount}>{g.count}</span>
+          </div>
+          {roles.map((r) => (
+            <div key={r.id} style={{ display: "flex", justifyContent: "center" }} onClick={(e) => e.stopPropagation()}>
+              <AllPill ids={pIds} granted={grants[r.id]} onToggle={(on) => onToggleMany(r.id, pIds, on)} />
+            </div>
+          ))}
+        </div>
+        {groupOpen(pk) && g.modules.map((m) => {
+          const mk = `m:${g.project}|${m.module ?? ""}`;
+          const mIds = resIds(m.items);
+          return (
+            <div key={mk}>
+              {m.module && (
+                <div style={{ ...s.modRow, gridTemplateColumns: colTemplate }} onClick={() => toggleCollapse(mk)}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8, paddingLeft: 14, minWidth: 0 }}>
+                    <span style={s.caret}>{groupOpen(mk) ? "▼" : "▶"}</span>
+                    <span style={s.modName}>{m.module}</span>
+                    <span style={s.groupCount}>{m.items.length}</span>
+                  </div>
+                  {roles.map((r) => (
+                    <div key={r.id} style={{ display: "flex", justifyContent: "center" }} onClick={(e) => e.stopPropagation()}>
+                      <AllPill ids={mIds} granted={grants[r.id]} onToggle={(on) => onToggleMany(r.id, mIds, on)} />
+                    </div>
+                  ))}
+                </div>
+              )}
+              {(!m.module || groupOpen(mk)) && m.items.map((row) => renderRow(row))}
+            </div>
+          );
+        })}
+      </div>
+    );
+  };
+
+  const renderNarrowRes = (res: Resource) => {
+    if (!activeRole) return null;
+                const ids = res.permissions.map((p) => p.id);
+                const open = !collapsed[res.id];
+                return (
+                  <div key={res.id}>
+                    <div style={{ ...s.resRow, display: "flex", justifyContent: "space-between" }} onClick={() => toggleCollapse(res.id)}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
+                        <span style={s.caret}>{open ? "▼" : "▶"}</span>
+                        <div style={{ minWidth: 0 }}>
+                          <span style={s.resName}>{res.name}</span>
+                          <SourceTag src={sources[res.name.toLowerCase()]} />
+                        </div>
+                      </div>
+                      <div onClick={(e) => e.stopPropagation()}>
+                        <AllPill ids={ids} granted={grants[activeRole.id]} onToggle={(on) => onToggleMany(activeRole.id, ids, on)} />
+                      </div>
+                    </div>
+                    {open && res.permissions.map((p) => (
+                      <div key={p.id} style={{ ...s.actionRow, display: "flex", justifyContent: "space-between" }}>
+                        <span style={{ ...s.actionName, paddingLeft: 24 }}>{p.action}</span>
+                        <Box size={24} checked={!!grants[activeRole.id]?.has(p.id)} onClick={() => onToggle(activeRole.id, p.id)} />
+                      </div>
+                    ))}
+                  </div>
+                );
+  };
+
+
+  return (
+    <>
+      <div style={s.toolbar}>
+        <SearchBox value={q} onChange={setQ} placeholder="Search resources, projects or modules…" />
+      </div>
+      {q.trim() && rows.length === 0 && (
+        <div style={common.empty}>No resources match "{q.trim()}".</div>
+      )}
+      {!narrow ? (
+        rows.length > 0 && <div style={s.matrixWrap}>
+          {/* sticky header */}
+          <div style={{ ...s.matrixHead, gridTemplateColumns: colTemplate }}>
+            <div style={s.colLabel}>Resource / Action</div>
+            {roles.map((r) => (
+              <div key={r.id} style={{ textAlign: "center", padding: "0 4px" }}>
+                <div style={s.roleHead} title={r.description}>{r.name}</div>
+                <div style={s.roleCount}>{countEnabled(r.id)}/{allPermIds.length}</div>
+              </div>
+            ))}
+          </div>
+
+          {tree.map((g) => renderGroup(g))}
         </div>
       ) : (
         <div>
@@ -597,32 +753,23 @@ function PermissionsTab({
                   {countEnabled(activeRole.id) === allPermIds.length ? "Deselect all" : "Select all"}
                 </button>
               </div>
-              {resources.map((res) => {
-                const ids = res.permissions.map((p) => p.id);
-                const open = !collapsed[res.id];
-                return (
-                  <div key={res.id}>
-                    <div style={{ ...s.resRow, display: "flex", justifyContent: "space-between" }} onClick={() => toggleCollapse(res.id)}>
-                      <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
-                        <span style={s.caret}>{open ? "▼" : "▶"}</span>
-                        <div style={{ minWidth: 0 }}>
-                          <span style={s.resName}>{res.name}</span>
-                          <SourceTag src={sources[res.name.toLowerCase()]} />
-                        </div>
-                      </div>
-                      <div onClick={(e) => e.stopPropagation()}>
-                        <AllPill ids={ids} granted={grants[activeRole.id]} onToggle={(on) => onToggleMany(activeRole.id, ids, on)} />
-                      </div>
+              {tree.map((g) => (
+                <div key={`np:${g.project}`}>
+                  <div style={{ ...s.projRow, display: "flex", justifyContent: "space-between" }} onClick={() => toggleCollapse(`p:${g.project}`)}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                      <span style={s.caret}>{groupOpen(`p:${g.project}`) ? "▼" : "▶"}</span>
+                      <span style={s.projName}>{g.project}</span>
+                      <span style={s.groupCount}>{g.count}</span>
                     </div>
-                    {open && res.permissions.map((p) => (
-                      <div key={p.id} style={{ ...s.actionRow, display: "flex", justifyContent: "space-between" }}>
-                        <span style={{ ...s.actionName, paddingLeft: 24 }}>{p.action}</span>
-                        <Box size={24} checked={!!grants[activeRole.id]?.has(p.id)} onClick={() => onToggle(activeRole.id, p.id)} />
-                      </div>
-                    ))}
                   </div>
-                );
-              })}
+                  {groupOpen(`p:${g.project}`) && g.modules.map((m) => (
+                    <div key={`nm:${g.project}|${m.module ?? ""}`}>
+                      {m.module && <div style={s.modRowNarrow}>{m.module}</div>}
+                      {m.items.filter((r) => r.res).map((r) => renderNarrowRes(r.res!))}
+                    </div>
+                  ))}
+                </div>
+              ))}
               <div style={s.progressWrap}>
                 <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, marginBottom: 8 }}>
                   <span style={{ color: c.textSub }}>Permissions enabled</span>
@@ -731,7 +878,6 @@ function AssignmentsTab({
   return (
     <>
       <div style={s.toolbar}>
-        <input style={{ ...common.input, flex: 1, minWidth: 200, width: "auto" }} placeholder="Search by name or email…" value={q} onChange={(e) => setQ(e.target.value)} />
         <select style={{ ...common.input, width: "auto", minWidth: 160 }} value={roleFilter} onChange={(e) => setRoleFilter(e.target.value)}>
           <option value="all">All roles</option>
           {roles.map((r) => <option key={r.id} value={r.id}>{r.name}</option>)}
@@ -739,6 +885,7 @@ function AssignmentsTab({
         <button style={s.headerBtn} onClick={onCreateUser}>
           <AddIcon sx={{ fontSize: 17 }} /> Create User
         </button>
+        <SearchBox value={q} onChange={setQ} placeholder="Search by name or email…" />
       </div>
 
       {users.length === 0 ? (
@@ -782,6 +929,8 @@ function RolesTab({
 }: { roles: Role[]; onAdd: () => void; onChanged: () => void; onError: (m: string) => void; onFlash: (m: string) => void }) {
   const [confirm, setConfirm] = useState<Role | null>(null);
   const [busy, setBusy] = useState(false);
+  const [q, setQ] = useState("");
+  const shown = roles.filter((r) => matches(q, r.name, r.description));
 
   async function doDelete() {
     if (!confirm) return;
@@ -797,8 +946,9 @@ function RolesTab({
 
   return (
     <>
-      <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 12 }}>
+      <div style={s.toolbar}>
         <button style={s.headerBtn} onClick={onAdd}><AddIcon sx={{ fontSize: 17 }} /> Add Role</button>
+        <SearchBox value={q} onChange={setQ} placeholder="Search roles by name or description…" />
       </div>
 
       {roles.length === 0 ? (
@@ -808,9 +958,10 @@ function RolesTab({
           <div style={{ ...s.tHead, gridTemplateColumns: "40px 2fr 4fr 90px" }}>
             <div>#</div><div>Role</div><div>Description</div><div style={{ textAlign: "right" }}>Action</div>
           </div>
-          {roles.map((r, i) => (
+          {shown.length === 0 && <div style={{ ...common.center, padding: 24 }}>No roles match "{q.trim()}".</div>}
+          {shown.map((r) => (
             <div key={r.id} style={{ ...s.tRow, gridTemplateColumns: "40px 2fr 4fr 90px" }}>
-              <div style={{ color: c.textMuted, fontSize: 12 }}>{i + 1}</div>
+              <div style={{ color: c.textMuted, fontSize: 12 }}>{roles.indexOf(r) + 1}</div>
               <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
                 <div style={common.icon}>{r.name[0].toUpperCase()}</div>
                 <span style={s.userName}>{r.name}</span>
@@ -857,10 +1008,18 @@ function ResourcesTab({
   const [adding, setAdding] = useState(false);
   const [form, setForm] = useState({ name: "", description: "" });
   const [confirm, setConfirm] = useState<Resource | null>(null);
+  const [q, setQ] = useState("");
 
   const byName = new Map(resources.map((r) => [r.name.toLowerCase(), r]));
   const unsynced = schemaNames.filter((n) => !byName.has(n.toLowerCase()));
   const orphans = resources.filter((r) => !schemaNames.some((n) => n.toLowerCase() === r.name.toLowerCase()));
+  const [collapsedG, setCollapsedG] = useState<Record<string, boolean>>({});
+  const gOpen = (k: string) => (q.trim() ? true : !collapsedG[k]);
+  const flipG = (k: string) => setCollapsedG((p) => ({ ...p, [k]: !p[k] }));
+  const visibleSchemas = sortBySource(schemaNames, sources).filter((n) => { const sc = sources[n.toLowerCase()]; return matches(q, n, sc?.project, sc?.module, sc?.table); });
+  const visibleOrphans = orphans.filter((r) => matches(q, r.name, r.description));
+  const visiblePages = visibleOrphans.filter((r) => isPageRes(r.name));
+  const visibleCustom = visibleOrphans.filter((r) => !isPageRes(r.name));
 
   const sync = onSync;
 
@@ -898,7 +1057,7 @@ function ResourcesTab({
     finally { setConfirm(null); }
   }
 
-  const renderCard = (name: string, res?: Resource, custom = false) => {
+  const renderCard = (name: string, res?: Resource, custom = false, badge?: string) => {
     const synced = !!res;
     const isOpen = !!res && expanded === res.id;
     return (
@@ -908,8 +1067,8 @@ function ResourcesTab({
             <div style={{ ...common.icon, ...(synced ? {} : { background: c.neutral.bg, color: c.textMuted }) }}>{name[0].toUpperCase()}</div>
             <div style={{ minWidth: 0 }}>
               <div style={{ ...common.cardTitle, display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-                {cap(name)}
-                <span style={{ ...s.badge, ...(synced ? s.badgeOn : s.badgeOff) }}>{custom ? "Custom" : synced ? "✓ Synced" : "Not synced"}</span>
+                {isPageRes(name) ? name.slice(5) : cap(name)}
+                <span style={{ ...s.badge, ...(synced ? s.badgeOn : s.badgeOff) }}>{badge ?? (custom ? "Custom" : synced ? "✓ Synced" : "Not synced")}</span>
               </div>
               <div style={common.cardDesc}>
                 {synced ? `${res!.permissions.length} action${res!.permissions.length !== 1 ? "s" : ""} defined` : "Sync to create permissions for this schema"}
@@ -977,6 +1136,10 @@ function ResourcesTab({
         </div>
       </div>
 
+      <div style={s.toolbar}>
+        <SearchBox value={q} onChange={setQ} placeholder="Search schemas, projects or modules…" />
+      </div>
+
       {adding && (
         <div style={{ ...common.card, padding: 16, display: "flex", flexDirection: "column", gap: 10, marginBottom: 12 }}>
           <input style={common.input} placeholder="Resource name (e.g. Invoice)" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
@@ -992,14 +1155,55 @@ function ResourcesTab({
 
       <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
         {schemaNames.length === 0 && <div style={common.empty}>No schemas found in the datastore.</div>}
-        {schemaNames.map((n) => renderCard(n, byName.get(n.toLowerCase())))}
+        {schemaNames.length > 0 && q.trim() && visibleSchemas.length === 0 && visibleOrphans.length === 0 && (
+          <div style={common.empty}>No resources match "{q.trim()}".</div>
+        )}
+        {groupItems(visibleSchemas, (n) => {
+          const sc = sources[n.toLowerCase()];
+          return { project: sc?.project ?? NO_PROJECT, module: sc?.module };
+        }).map((g) => {
+          const pk = `p:${g.project}`;
+          const done = g.modules.flatMap((m) => m.items).filter((n) => byName.has(n.toLowerCase())).length;
+          return (
+            <div key={pk} style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+              <div style={{ ...s.projRow, display: "flex", alignItems: "center", gap: 8, borderRadius: 10, border: `1px solid ${c.border}` }} onClick={() => flipG(pk)}>
+                <span style={s.caret}>{gOpen(pk) ? "▼" : "▶"}</span>
+                <span style={s.projName}>{g.project}</span>
+                <span style={s.groupCount}>{g.count}</span>
+                <span style={{ fontSize: 11, color: c.textMuted, marginLeft: "auto" }}>{done}/{g.count} synced</span>
+              </div>
+              {gOpen(pk) && g.modules.map((m) => (
+                <div key={`${pk}|${m.module ?? ""}`} style={{ display: "flex", flexDirection: "column", gap: 10, paddingLeft: 14 }}>
+                  {m.module && <div style={s.modRowNarrow}>{m.module} <span style={s.groupCount}>{m.items.length}</span></div>}
+                  {m.items.map((n) => renderCard(n, byName.get(n.toLowerCase())))}
+                </div>
+              ))}
+            </div>
+          );
+        })}
       </div>
 
-      {orphans.length > 0 && (
+      {visiblePages.length > 0 && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 10, marginTop: 10 }}>
+          <div style={{ ...s.projRow, display: "flex", alignItems: "center", gap: 8, borderRadius: 10, border: `1px solid ${c.border}` }} onClick={() => flipG("p:Pages")}>
+            <span style={s.caret}>{gOpen("p:Pages") ? "▼" : "▶"}</span>
+            <span style={s.projName}>Pages</span>
+            <span style={s.groupCount}>{visiblePages.length}</span>
+            <span style={{ fontSize: 11, color: c.textMuted, marginLeft: "auto" }}>published pages in the client app</span>
+          </div>
+          {gOpen("p:Pages") && (
+            <div style={{ display: "flex", flexDirection: "column", gap: 10, paddingLeft: 14 }}>
+              {visiblePages.map((r) => renderCard(r.name, r, true, "Page"))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {visibleCustom.length > 0 && (
         <>
           <div style={{ ...common.sectionLabel, marginTop: 26 }}>Custom resources</div>
           <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-            {orphans.map((r) => renderCard(r.name, r, true))}
+            {visibleCustom.map((r) => renderCard(r.name, r, true))}
           </div>
         </>
       )}
@@ -1577,6 +1781,12 @@ const s: Record<string, CSSProperties> = {
   roleHead:    { fontSize: 13, fontWeight: 700, textTransform: "uppercase", color: c.accentText, letterSpacing: 0.4, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
   roleCount:   { fontSize: 10, color: c.textMuted, marginTop: 2 },
   resRow:      { display: "grid", alignItems: "center", padding: "10px 16px", background: "rgba(255,255,255,0.04)", borderTop: rowLine, borderBottom: rowLine, cursor: "pointer" },
+  projRow:     { display: "grid", alignItems: "center", padding: "11px 16px", background: "rgba(139,92,246,0.14)", borderTop: `1px solid ${c.accentBorder}`, borderBottom: rowLine, cursor: "pointer" },
+  projName:    { fontSize: 13, fontWeight: 800, textTransform: "uppercase", letterSpacing: 0.6, color: c.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
+  modRow:      { display: "grid", alignItems: "center", padding: "8px 16px", background: "rgba(255,255,255,0.07)", borderBottom: rowLine, cursor: "pointer" },
+  modRowNarrow:{ fontSize: 12, fontWeight: 700, color: c.textSub, padding: "6px 16px", display: "flex", alignItems: "center", gap: 8 },
+  modName:     { fontSize: 12, fontWeight: 700, color: c.accentText, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
+  groupCount:  { fontSize: 11, fontWeight: 700, padding: "0 8px", borderRadius: 20, background: "rgba(255,255,255,0.08)", color: c.textSub },
   caret:       { fontSize: 10, color: c.textMuted, width: 14, flexShrink: 0 },
   resName:     { fontSize: 13, fontWeight: 700, textTransform: "uppercase", color: c.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
   actionRow:   { display: "grid", alignItems: "center", padding: "8px 16px", borderBottom: "1px solid rgba(255,255,255,0.04)" },
