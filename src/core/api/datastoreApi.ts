@@ -37,6 +37,7 @@ export interface BackendSchemaField {
   relationKind?: string;           // "integral" | "association"
   relatedDomain?: string;          // the domain this field's relation points to
   relatedDomains?: string[];       // several domains linked by ONE association field — the form shows a domain picker
+  multiLinkDomain?: boolean;      // FK field belongs to an associative multi-link domain
   validationRefs?: string[];       // attached named validation-rule tags
   // Extended metadata stored via model_config extra: allow
   component?:    string;
@@ -255,6 +256,7 @@ export function domainToBackendRequest(params: {
     // One association field linking SEVERAL domains: the column stores which
     // one was chosen, and this list is what the form's picker offers.
     if (fieldDef.relatedDomains && fieldDef.relatedDomains.length > 1) field.relatedDomains = fieldDef.relatedDomains;
+    if (fieldDef.multiLinkDomain) field.multiLinkDomain = true;
 
     // Resolve registry-attached rules (validationRefs) into real, flat
     // rules the Form plugin can run. Inline validations alone were not
@@ -305,7 +307,7 @@ export function backendSchemaToFrontend(entry: BackendSchemaEntry): {
   fields:     Record<string, {
     type: string; default?: any; datasource?: string;
     cardinality?: string; relationKind?: string;
-    relatedDomain?: string; relatedDomains?: string[]; validationRefs?: string[];
+    relatedDomain?: string; relatedDomains?: string[]; multiLinkDomain?: boolean; validationRefs?: string[];
   }>;
   uiHints:    Record<string, Record<string, any>>;
   rbacRules:  Record<string, Record<string, any>>;
@@ -332,6 +334,7 @@ export function backendSchemaToFrontend(entry: BackendSchemaEntry): {
       // them off this returned object, so they must be passed through here.
       relatedDomain:  field.relatedDomain ?? undefined,
       relatedDomains: field.relatedDomains ?? undefined,
+      multiLinkDomain: field.multiLinkDomain ?? undefined,
       validationRefs: field.validationRefs ?? undefined,
     };
 

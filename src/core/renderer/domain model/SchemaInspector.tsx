@@ -300,6 +300,67 @@ async function handleQuickCreateDomain(name: string, fields: QuickCreateField[])
     setTimeout(() => setBackendLoadStatus(null), 4000);
   }
 
+  async function handleCreateMultiLinkDomain(name: string, linkedDomains: string[]) {
+    if (linkedDomains.length < 2) {
+      throw new Error("Select at least two domains to create a multi-link domain.");
+    }
+
+    const cachedFields = extra.newDomains.find((domain) => domain.name === name)?.fields ?? {};
+    const existingFields: Record<string, DomainFieldCore> = {};
+    for (const [fieldName, field] of Object.entries(cachedFields)) {
+      existingFields[fieldName] = { ...field };
+    }
+    for (const [fieldName, field] of Object.entries(liveSchemas.domains[name]?.fields ?? {})) {
+      existingFields[fieldName] = { ...existingFields[fieldName], ...field } as DomainFieldCore;
+      const validationRefs = liveSchemas._layers?.validationRefs?.[`${name}.${fieldName}`];
+      if (validationRefs?.length) existingFields[fieldName].validationRefs = validationRefs;
+    }
+
+    for (const linkedDomain of linkedDomains) {
+      const fieldName = `${linkedDomain}Id`;
+      existingFields[fieldName] = {
+        ...existingFields[fieldName],
+        type: "string",
+        relatedDomain: linkedDomain,
+        relationKind: "association",
+        multiLinkDomain: true,
+      };
+    }
+
+    const req = domainToBackendRequest({
+      registry: liveSchemas._layers?.validationRegistry ?? {},
+      domainName: name,
+      fields: existingFields,
+      uiHints: liveSchemas._layers?.ui ?? {},
+      rbacRules: liveSchemas._layers?.rbac?.fields ?? {},
+      abacRules: liveSchemas._layers?.abac?.rules ?? {},
+      db_backend: extra.dbBackends[name] === "dynamodb" ? "dynamodb" : "postgresql",
+      versioned: extra.versioned[name],
+    });
+    const res = await apiCreateDomain(req);
+    if (res.status !== "success") {
+      throw new Error(res.message || `Could not create multi-link domain "${name}".`);
+    }
+
+    setExtra((prev) => ({
+      ...prev,
+      newDomains: [
+        ...prev.newDomains.filter((domain) => domain.name !== name),
+        { name, fields: existingFields },
+      ],
+      dbBackends: { ...prev.dbBackends, [name]: res.db_backend ?? extra.dbBackends[name] ?? "postgresql" },
+      projectIds: prev.projectIds[name] || !currentProjectId
+        ? prev.projectIds
+        : { ...prev.projectIds, [name]: currentProjectId },
+      moduleIds: prev.moduleIds[name] || !currentModuleId
+        ? prev.moduleIds
+        : { ...prev.moduleIds, [name]: currentModuleId },
+    }));
+
+    setBackendLoadStatus(`✅ Multi-link domain "${name}" created or updated.`);
+    setTimeout(() => setBackendLoadStatus(null), 4000);
+  }
+
   // ── Rich quick-create (LinkDomainModal's embedded compact FieldBuilder) ───
   // Separate from handleQuickCreateDomain above (legacy QuickCreateField[]
   // path, still used by the __new__: JSON-encoded flow elsewhere) — this
@@ -1585,6 +1646,7 @@ function handleViewConfig(domainName: string, cfg: DomainViewConfig) {
                 // different function.
                 relatedDomain: (v as any).relatedDomain,
                 relatedDomains: (v as any).relatedDomains,
+                multiLinkDomain: v.multiLinkDomain,
                 cardinality: (v as any).cardinality,
                 // Same gap, one more field: validationRefs (the tag
                 // names, e.g. ["required-name"]) was never carried
@@ -1694,6 +1756,11 @@ function handleViewConfig(domainName: string, cfg: DomainViewConfig) {
           projectIds={extra.projectIds}
           moduleIds={extra.moduleIds}
           focusDomain={focusDomain}
+          multiLinkDomains={new Set(
+            Object.entries(visibleSchemas.domains)
+              .filter(([, domain]) => Object.values(domain.fields).some((field) => field.multiLinkDomain))
+              .map(([name]) => name)
+          )}
          junctionDomains={new Set(
   Array.from(extra.junctionPairs).flatMap((pairKey) => {
     const parts = pairKey.split("__");
@@ -1713,6 +1780,7 @@ function handleViewConfig(domainName: string, cfg: DomainViewConfig) {
           onRichCreateDomain={handleRichCreateDomain}
           onRedirectToCreate={handleRedirectToCreate}
           onGoToCreateDomain={() => setTab("create")}
+          onCreateMultiLinkDomain={handleCreateMultiLinkDomain}
           onAddValidationRule={handleAddValidationRule}
           availableRoles={availableRoles}
           permissions={permissions}
