@@ -152,6 +152,8 @@ export interface DomainFieldCore {
    * Omitted for ordinary single-domain relations.
    */
   relatedDomains?:  string[];
+  /** Marks an FK field created as part of an associative multi-link domain. */
+  multiLinkDomain?: boolean;
   /**
    * Only meaningful for FK relation fields pointing at an EXISTING domain
    * (the "belongs-to" case, e.g. branch.clinicId → clinic). Tags whether
@@ -311,6 +313,7 @@ export interface DomainFieldDef {
   format?:        FieldFormat;
   relatedDomain?: string;
   relatedDomains?: string[];
+  multiLinkDomain?: boolean;
   listDomain?:    string;
   /**
    * For "relation" fields — mirrors DomainFieldCore.cardinality. Added so
