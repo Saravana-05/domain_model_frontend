@@ -69,6 +69,8 @@ export interface DomainModelTabProps {
   onRedirectToCreate: (domainName: string, parentDomain?: string, fieldName?: string) => void;
   onGoToCreateDomain: () => void;
   onCreateMultiLinkDomain: (name: string, linkedDomains: string[]) => Promise<void>;
+  /** Names offered as link targets: this module's domains plus the other modules' in the same project. */
+  linkableDomainNames?: string[];
   onAddValidationRule?: (tag: string, rule: NamedValidationRule) => void;
 
   /** domainName -> attribute-based access rules for that domain.
@@ -132,6 +134,7 @@ export function DomainModelTab({
   onAddField, onEditField, onDeleteField, onDeleteDomain, onRenameDomain, onViewConfig, onSaveBackend, onQuickCreateDomain, onRedirectToCreate,
   onGoToCreateDomain,
   onCreateMultiLinkDomain,
+  linkableDomainNames,
   onAddValidationRule,
   permissions, onChangePermissions, onSavePermissions, userAttributes, availableRoles, onLoadPermissions,
 }: DomainModelTabProps) {
@@ -167,6 +170,7 @@ export function DomainModelTab({
   const [expandedChildren, setExpandedChildren] = useState<Record<string, boolean>>({});
   const [jsonModalDomain, setJsonModalDomain] = useState<string | null>(null);
   const domainNames   = Object.keys(schemas.domains);
+  const pickerDomainNames = linkableDomainNames ?? domainNames;
 
   // Attribute-based permissions. Which domain cards have the panel open, plus a
   // local fallback store so the UI works before the backend is connected.
@@ -445,7 +449,7 @@ export function DomainModelTab({
                                 initialName={fieldName}
                                 initialDraft={fieldDefToDraft(fieldDef, schemas, fp)}
                                 registry={registry}
-                                domainNames={domainNames}
+                                domainNames={pickerDomainNames}
                                 parentDomainName={domainName}
                                 onNewDomainFromRelation={onQuickCreateDomain}
                                 onAddValidationRule={onAddValidationRule}
@@ -519,7 +523,7 @@ export function DomainModelTab({
                               <FieldBuilder
                                 submitLabel={`Add to ${childName}`}
                                 registry={registry}
-                                domainNames={domainNames}
+                                domainNames={pickerDomainNames}
                                 parentDomainName={childName}
                                 onNewDomainFromRelation={onQuickCreateDomain}
                                 onAddValidationRule={onAddValidationRule}
@@ -560,7 +564,7 @@ export function DomainModelTab({
                   <FieldBuilder
                     submitLabel={`Add to ${domainName}`}
                     registry={registry}
-                    domainNames={domainNames}
+                    domainNames={pickerDomainNames}
                     parentDomainName={domainName}
                     onNewDomainFromRelation={onQuickCreateDomain}
                     onAddValidationRule={onAddValidationRule}
@@ -583,7 +587,7 @@ export function DomainModelTab({
 
       <CreateMultiLinkDomainModal
         open={showCreateMultiLinkModal}
-        domainNames={Object.keys(schemas.domains)}
+        domainNames={pickerDomainNames}
         onClose={() => setShowCreateMultiLinkModal(false)}
         onCreate={onCreateMultiLinkDomain}
       />
@@ -671,8 +675,15 @@ export function fieldDefToDraft(fieldDef: any, schemas: AllSchemas, fullPath: st
     listDomain:     (fieldDef as any).listDomain     ?? "",
     validationRefs: valRefs,
     validations:    [],
-    isPartOf:       isExistingDomainRelation ? "fk" : true,
+    // Only a REAL FK column (named `${relatedDomain}Id`) is a belongs-to link.
+    // Any other relation field (e.g. "cutomers") is a display-only association
+    // marker — edit it as an association so saving keeps the typed name and
+    // never adds a `${relatedDomain}Id` column.
+    isPartOf:       isExistingDomainRelation
+      ? (fieldId.toLowerCase() === `${relatedDomain}Id`.toLowerCase() ? "fk" : false)
+      : true,
     relationKind:   (fieldDef as any).relationKind === "integral" ? "integral" : "association",
+    linkMode:       (fieldDef as any).linkMode === "owns" ? "owns" : (fieldDef as any).linkMode === "uses" ? "uses" : undefined,
     exprStr:        comp?.expression ?? "",
     depsStr:        comp?.dependsOn?.join(", ") ?? "",
     component:       (uiHint.component ?? "text") as ComponentType,

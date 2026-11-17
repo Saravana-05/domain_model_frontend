@@ -33,6 +33,9 @@ export interface FieldDraft {
    *                     → branch) — Add Existing / Remove shown downstream.
    */
   relationKind:   "integral" | "association";
+  /** Owns / Uses label only — saved on the attribute for other apps (e.g. the
+   *  page builder) to read. Never changes the table structure. */
+  linkMode?:      "owns" | "uses";
   validationRefs: string[];
   validations:    DraftValidation[];
   exprStr:        string;

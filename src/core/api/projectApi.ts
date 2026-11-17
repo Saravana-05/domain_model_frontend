@@ -80,3 +80,76 @@ export async function apiUpdateProject(
 export async function apiDeleteProject(projectId: string): Promise<ApiResult<null>> {
   return apiFetch(`/projects/${projectId}`, { method: "DELETE" });
 }
+
+// ── Project users ─────────────────────────────────────────────────────────────
+// Every project has its own user table (named after the project, e.g.
+// idam.testing_user). Entering a user there links them to RBAC: project
+// membership + roles that apply only inside that project. Admin-only.
+
+export interface ProjectUserRole { id: string; name: string }
+
+export interface ProjectUser {
+  user_id:    string;
+  user_name:  string;
+  email:      string;
+  is_active:  boolean;
+  added_by?:  string | null;
+  created_at?: string | null;
+  roles:      ProjectUserRole[];
+}
+
+export interface ProjectUsersResult extends ApiResult<ProjectUser[]> {
+  /** Name of the project's user table, e.g. "idam.testing_user" */
+  table?: string | null;
+}
+
+/** GET /projects/{id}/users — rows of the project's user table */
+export async function apiListProjectUsers(projectId: string): Promise<ProjectUsersResult> {
+  return apiFetch(`/projects/${projectId}/users`);
+}
+
+/** POST /projects/{id}/users — add an existing user (user_id) or create one (new_user) */
+export async function apiAddProjectUser(
+  projectId: string,
+  payload: {
+    user_id?:  string;
+    new_user?: { user_name: string; email: string; password: string };
+    /** roles inside this project; omit to leave the user's roles unchanged */
+    role_ids?: string[];
+  },
+): Promise<ApiResult<ProjectUser>> {
+  return apiFetch(`/projects/${projectId}/users`, {
+    method: "POST",
+    body:   JSON.stringify(payload),
+  });
+}
+
+/** PUT /projects/{id}/users/{userId}/roles — replace the user's roles in this project */
+export async function apiSetProjectUserRoles(
+  projectId: string,
+  userId: string,
+  roleIds: string[],
+): Promise<ApiResult<ProjectUser>> {
+  return apiFetch(`/projects/${projectId}/users/${userId}/roles`, {
+    method: "PUT",
+    body:   JSON.stringify({ role_ids: roleIds }),
+  });
+}
+
+/** DELETE /projects/{id}/users/{userId} — remove the user from the project */
+export async function apiRemoveProjectUser(projectId: string, userId: string): Promise<ApiResult<null>> {
+  return apiFetch(`/projects/${projectId}/users/${userId}`, { method: "DELETE" });
+}
+
+/** Pull the readable message out of an "API 400: {"detail":"..."}" error. */
+export function apiErrorMessage(err: unknown, fallback = "Something went wrong"): string {
+  const msg = err instanceof Error ? err.message : String(err ?? "");
+  const m = msg.match(/\{.*\}/s);
+  if (m) {
+    try {
+      const d = JSON.parse(m[0])?.detail;
+      if (typeof d === "string") return d;
+    } catch { /* fall through */ }
+  }
+  return msg || fallback;
+}

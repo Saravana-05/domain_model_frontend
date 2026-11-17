@@ -6,6 +6,8 @@ import ViewModuleOutlinedIcon from "@mui/icons-material/ViewModuleOutlined";
 import TableChartOutlinedIcon from "@mui/icons-material/TableChartOutlined";
 import AddIcon                from "@mui/icons-material/Add";
 import RefreshIcon            from "@mui/icons-material/Refresh";
+import PeopleAltOutlinedIcon  from "@mui/icons-material/PeopleAltOutlined";
+import { useAuthStore } from "../../store/authStore";
 import { useProjectStore } from "../../core/store/projectStore";
 import { apiListAllModules, apiCreateModule, type BackendModule } from "../api/moduleApi";
 import { apiListSchemas } from "../api/datastoreApi";
@@ -28,6 +30,10 @@ interface SidebarTreeProps {
   onSelectDomain:  (domain: { name: string; projectId: string | null; moduleId: string | null }) => void;
   /** Click on the "Projects" header — the Projects overview page. */
   onOpenProjectsPage: () => void;
+  /** Click on a project's "Users" row (admins only) — that project's user table. */
+  onSelectProjectUsers?: (projectId: string) => void;
+  /** Project whose Users page is open right now (highlights its row). */
+  activeUsersProjectId?: string | null;
 }
 
 const EXPANDED_KEY = "sidebar-tree-expanded";
@@ -53,7 +59,9 @@ function loadExpanded(): Set<string> {
  */
 export function SidebarTree({
   activeDomain, onSelectProject, onSelectModule, onSelectDomain, onOpenProjectsPage,
+  onSelectProjectUsers, activeUsersProjectId,
 }: SidebarTreeProps) {
+  const isAdmin = useAuthStore((s) => s.isAdmin());
   const projects         = useProjectStore((s) => s.projects);
   const currentProjectId = useProjectStore((s) => s.currentProjectId);
   const currentModuleId  = useProjectStore((s) => s.currentModuleId);
@@ -175,7 +183,8 @@ export function SidebarTree({
         const open = expanded.has(pid);
         const pModules = tree.modulesOf(p.id);
         const loose = tree.looseDomainsOf(p.id);
-        const projectActive = currentProjectId === p.id && !currentModuleId && !activeDomain;
+        const projectActive = currentProjectId === p.id && !currentModuleId && !activeDomain
+          && activeUsersProjectId !== p.id;   // Users page open -> highlight only its "Users" row
 
         return (
           <div key={pid}>
@@ -205,6 +214,18 @@ export function SidebarTree({
 
             {open && (
               <>
+                {/* This project's own user table (admins only) */}
+                {isAdmin && onSelectProjectUsers && (
+                  <div
+                    title={`Users of ${p.name}`}
+                    style={{ ...styles.row, paddingLeft: 22, ...(activeUsersProjectId === p.id ? styles.rowActive : {}) }}
+                    onClick={() => onSelectProjectUsers(p.id)}
+                  >
+                    <span style={styles.chevronSpacer} />
+                    <PeopleAltOutlinedIcon sx={{ fontSize: 15 }} style={{ flexShrink: 0, color: "#fbbf24" }} />
+                    <span style={styles.label}>Users</span>
+                  </div>
+                )}
                 {pModules.map((m) => {
                   const mid = `m:${m.id}`;
                   const mOpen = expanded.has(mid);

@@ -161,6 +161,9 @@ export function buildSchemas(input: BuildSchemasInput): AllSchemas {
       if (fieldDef.multiLinkDomain) {
         fieldEntry.multiLinkDomain = true;
       }
+      if ((fieldDef as any).linkMode) {
+        fieldEntry.linkMode = (fieldDef as any).linkMode;
+      }
       if (fieldDef.type === "list" && fieldDef.listDomain) {
         fieldEntry.listDomain = fieldDef.listDomain;
       }

@@ -164,6 +164,8 @@ export interface DomainFieldCore {
    * field so the view-builder can read it.
    */
   relationKind?:    "integral" | "association";
+  /** Owns / Uses label — metadata only, never affects table structure. */
+  linkMode?:        "owns" | "uses";
   /**
    * For "relation" fields — whether this field points to a single related
    * record ("one") or a collection of them ("many"/"list"). Used by
@@ -314,6 +316,7 @@ export interface DomainFieldDef {
   relatedDomain?: string;
   relatedDomains?: string[];
   multiLinkDomain?: boolean;
+  linkMode?:      "owns" | "uses";
   listDomain?:    string;
   /**
    * For "relation" fields — mirrors DomainFieldCore.cardinality. Added so
