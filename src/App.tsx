@@ -10,13 +10,12 @@ import { useProjectStore } from "./core/store/projectStore";
 import { ProjectsScreen } from "./screens/ProjectsScreen";
 import { SidebarTree } from "../src/core/components/SidebarTree";
 import { ModulesScreen } from "./screens/ModulesScreen";
-import { ProjectUsersScreen } from "./screens/ProjectUsersScreen";
 import CloudUploadOutlinedIcon from "@mui/icons-material/CloudUploadOutlined";
 import CodeIcon                from "@mui/icons-material/Code";
 import FilterListIcon          from "@mui/icons-material/FilterList";
 import "./App.css";
 
-type Screen = "projects" | "modules" | "inspector" | "rbac" | "projectUsers";
+type Screen = "projects" | "modules" | "inspector" | "rbac";
 
 const NAV_ITEMS: { id: Screen; label: string; group?: string }[] = [
   { id: "rbac", label: "Access Control", group: "RBAC Admin" },
@@ -142,8 +141,6 @@ export default function App() {
   const [focusDomain, setFocusDomain] = useState<string | null>(null);
   // Modules page: which project it starts filtered to.
   const [modulesProjectFilter, setModulesProjectFilter] = useState<string | null>(null);
-  // Project users page: which project's user table is shown.
-  const [usersProjectId, setUsersProjectId] = useState<string | null>(null);
   const schemaInspectorRef = useRef<SchemaInspectorHandle>(null);
 
   const projects            = useProjectStore((s) => s.projects);
@@ -208,16 +205,6 @@ export default function App() {
     setScreen("modules");
   }
 
-  /** "Users" row under a project: that project's user table (admins only). */
-  function openProjectUsers(projectId: string) {
-    setFocusDomain(null);
-    setCurrentProjectId(projectId);
-    setCurrentModuleId(null);
-    fetchModules(projectId);
-    setUsersProjectId(projectId);
-    setScreen("projectUsers");
-  }
-
   /** Module selected: scopes every subsequent domain-model read/create to
    *  it (via projectStore.currentModuleId, read by datastoreApi.ts) and
    *  jumps to the Domain Model tab. */
@@ -271,8 +258,6 @@ export default function App() {
             onSelectModule={openModule}
             onSelectDomain={openDomain}
             onOpenProjectsPage={() => setScreen("projects")}
-            onSelectProjectUsers={openProjectUsers}
-            activeUsersProjectId={screen === "projectUsers" ? usersProjectId : null}
           />
 
           <div style={styles.navGroup}>Domain Model</div>
@@ -403,14 +388,6 @@ export default function App() {
           </div>
         )}
         {isAdmin && screen === "rbac" && <RbacScreen />}
-        {screen === "projectUsers" && !isAdmin && (
-          <div style={{ padding: "48px 32px", color: "#b3abc7", textAlign: "center" }}>
-            🔒 Project users can only be managed by administrators.
-          </div>
-        )}
-        {isAdmin && screen === "projectUsers" && usersProjectId && (
-          <ProjectUsersScreen projectId={usersProjectId} />
-        )}
       </main>
     </div>
   );

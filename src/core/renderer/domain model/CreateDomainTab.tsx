@@ -17,7 +17,7 @@ import type {
   RBACFieldRule, ABACFieldRule, NamedValidationRule, FieldType,
 } from "../../schema/types";
 import {
-  domainToBackendRequest, apiCreateDomain,
+  domainToBackendRequest, apiCreateDomain, displayDomainName,
   apiSaveDraft, apiListDrafts, apiSubmitDraft, apiDeleteDraft,
   type BackendCreateResponse, type BackendCreateRequest, type BackendDraft,
 } from "../../api/datastoreApi";
@@ -527,6 +527,9 @@ export function CreateDomainTab({ onAdd, registry = {}, domainNames = [], onQuic
     } as any);
     req.project_id = selectedProjectId;
     req.module_id  = selectedModuleId;
+    // Creating a brand-new domain model: the backend rejects (409) a name that
+    // already exists in this project. The same name in another project is fine.
+    req.is_new     = true;
     out.push({ label: "Main table", req });
 
     for (const rd of payload.relatedDomains ?? []) {
@@ -579,14 +582,17 @@ export function CreateDomainTab({ onAdd, registry = {}, domainNames = [], onQuic
           const action = res.table_created ? "created" : "already existed";
           messages.push(
             label === "Main table"
-              ? `✅ "${res.table_name}" ${action} in ${dbLocation(res)}`
+              ? `✅ "${displayDomainName(res.table_name, res.domain_name)}" ${action} in ${dbLocation(res)}`
               : `✅ ${label} ${action}`,
           );
         } else {
           messages.push(`❌ ${label} error: ${res.message}`);
         }
       } catch (err: any) {
-        messages.push(`⚠️ ${label} backend unreachable: ${err?.message ?? String(err)}`);
+        const msg = String(err?.message ?? err);
+        // 409 = duplicate name in this project: show the backend's reason, not "unreachable".
+        const dup = msg.startsWith("API 409") ? msg.match(/"detail"\s*:\s*"([^"]+)"/)?.[1] : undefined;
+        messages.push(dup ? `❌ ${dup}` : `⚠️ ${label} backend unreachable: ${msg}`);
       }
     }
 
@@ -781,7 +787,7 @@ export function CreateDomainTab({ onAdd, registry = {}, domainNames = [], onQuic
       const results = res.results ?? [];
       const made = results.map((r) =>
         r.status === "success"
-          ? `✅ "${r.table_name}" ${r.created ? "created" : "already existed"}`
+          ? `✅ "${displayDomainName(r.table_name)}" ${r.created ? "created" : "already existed"}`
           : `❌ "${r.table_name}": ${r.message}`
       );
 

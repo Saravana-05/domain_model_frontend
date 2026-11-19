@@ -6,16 +6,17 @@ import ViewModuleOutlinedIcon from "@mui/icons-material/ViewModuleOutlined";
 import TableChartOutlinedIcon from "@mui/icons-material/TableChartOutlined";
 import AddIcon                from "@mui/icons-material/Add";
 import RefreshIcon            from "@mui/icons-material/Refresh";
-import PeopleAltOutlinedIcon  from "@mui/icons-material/PeopleAltOutlined";
-import { useAuthStore } from "../../store/authStore";
 import { useProjectStore } from "../../core/store/projectStore";
 import { apiListAllModules, apiCreateModule, type BackendModule } from "../api/moduleApi";
-import { apiListSchemas } from "../api/datastoreApi";
+import { apiListSchemas, displayDomainName } from "../api/datastoreApi";
 import { CreateEntityModal } from "./CreateEntityModal";
 
 /** One domain model as the tree needs it. */
 interface TreeDomain {
+  /** Internal key (backend table_name) - used for selection and every API call. */
   name:      string;
+  /** Visible name; can differ from the key when another project has the same name. */
+  display:   string;
   /** Business name typed by the user (e.g. "Client Details"). */
   label?:    string;
   projectId: string | null;
@@ -30,10 +31,6 @@ interface SidebarTreeProps {
   onSelectDomain:  (domain: { name: string; projectId: string | null; moduleId: string | null }) => void;
   /** Click on the "Projects" header — the Projects overview page. */
   onOpenProjectsPage: () => void;
-  /** Click on a project's "Users" row (admins only) — that project's user table. */
-  onSelectProjectUsers?: (projectId: string) => void;
-  /** Project whose Users page is open right now (highlights its row). */
-  activeUsersProjectId?: string | null;
 }
 
 const EXPANDED_KEY = "sidebar-tree-expanded";
@@ -59,9 +56,7 @@ function loadExpanded(): Set<string> {
  */
 export function SidebarTree({
   activeDomain, onSelectProject, onSelectModule, onSelectDomain, onOpenProjectsPage,
-  onSelectProjectUsers, activeUsersProjectId,
 }: SidebarTreeProps) {
-  const isAdmin = useAuthStore((s) => s.isAdmin());
   const projects         = useProjectStore((s) => s.projects);
   const currentProjectId = useProjectStore((s) => s.currentProjectId);
   const currentModuleId  = useProjectStore((s) => s.currentModuleId);
@@ -103,7 +98,8 @@ export function SidebarTree({
       setModules(mods.data ?? []);
       setDomains(
         ((schemas as any).schemas ?? []).map((s: any) => ({
-          name:      s.table_name,
+          name:      s.table_name,                       // internal key - used for every API call
+          display:   displayDomainName(s.table_name, s.domain_name),   // what the user should see
           label:     s.label ?? undefined,
           projectId: s.project_id ?? null,
           moduleId:  s.module_id ?? null,
@@ -149,13 +145,13 @@ export function SidebarTree({
   const domainRow = (d: TreeDomain, indent: number) => (
     <div
       key={`d:${d.name}`}
-      title={d.label && d.label !== d.name ? `${d.label} (${d.name})` : d.name}
+      title={d.label && d.label !== d.display ? `${d.label} (${d.display})` : d.display}
       style={{ ...styles.row, paddingLeft: indent, ...(activeDomain === d.name ? styles.rowActive : {}) }}
       onClick={() => onSelectDomain(d)}
     >
       <span style={styles.chevronSpacer} />
       <TableChartOutlinedIcon sx={{ fontSize: 14 }} style={{ flexShrink: 0, color: "#7dd3fc" }} />
-      <span style={styles.label}>{d.label || d.name}</span>
+      <span style={styles.label}>{d.label || d.display}</span>
     </div>
   );
 
@@ -183,8 +179,7 @@ export function SidebarTree({
         const open = expanded.has(pid);
         const pModules = tree.modulesOf(p.id);
         const loose = tree.looseDomainsOf(p.id);
-        const projectActive = currentProjectId === p.id && !currentModuleId && !activeDomain
-          && activeUsersProjectId !== p.id;   // Users page open -> highlight only its "Users" row
+        const projectActive = currentProjectId === p.id && !currentModuleId && !activeDomain;
 
         return (
           <div key={pid}>
@@ -214,18 +209,6 @@ export function SidebarTree({
 
             {open && (
               <>
-                {/* This project's own user table (admins only) */}
-                {isAdmin && onSelectProjectUsers && (
-                  <div
-                    title={`Users of ${p.name}`}
-                    style={{ ...styles.row, paddingLeft: 22, ...(activeUsersProjectId === p.id ? styles.rowActive : {}) }}
-                    onClick={() => onSelectProjectUsers(p.id)}
-                  >
-                    <span style={styles.chevronSpacer} />
-                    <PeopleAltOutlinedIcon sx={{ fontSize: 15 }} style={{ flexShrink: 0, color: "#fbbf24" }} />
-                    <span style={styles.label}>Users</span>
-                  </div>
-                )}
                 {pModules.map((m) => {
                   const mid = `m:${m.id}`;
                   const mOpen = expanded.has(mid);

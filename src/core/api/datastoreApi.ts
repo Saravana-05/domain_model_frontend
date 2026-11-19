@@ -51,6 +51,17 @@ export interface BackendSchemaField {
   [key: string]: any;              // any extra fields
 }
 
+/**
+ * Name to SHOW for a domain model. The backend key can carry a "__<projectId>"
+ * suffix (e.g. "Client__10") when another project already has a model called
+ * "Client"; users should only ever see "Client". Prefer the backend's
+ * `domain_name`, and strip the suffix as a fallback. Never use this for API calls.
+ */
+export function displayDomainName(key: string, domainName?: string | null): string {
+  const base = (domainName && domainName.trim()) ? domainName : key;
+  return base.replace(/__(?:\d+|np)(?:_\d+)?$/, "");
+}
+
 export interface BackendCreateRequest {
   table_name: string;
   schema:     BackendSchemaField[];
@@ -67,11 +78,19 @@ export interface BackendCreateRequest {
    *  project is also taken from the current selection); explicit `null`
    *  → "no module". */
   module_id?: string | number | null;
+  /** Send true when the user is CREATING a new domain model (not saving edits to
+   *  an existing one). The backend then rejects a name that already exists in the
+   *  same project (409). The same name in a DIFFERENT project is allowed. */
+  is_new?: boolean;
 }
 
 export interface BackendCreateResponse {
   status:        string;
+  /** Internal key — use this for every later API call. Equals the name unless
+   *  another project already has a model with that name (e.g. "Department__2"). */
   table_name:    string;
+  /** The name the user typed / should see (same for both projects' "Department"). */
+  domain_name?:  string;
   table_created?: boolean;   // true = just created, false = already existed
   action?:       string;     // "created" | "already existed"
   db_backend?:   string;     // "dynamodb" | "postgresql"
@@ -86,6 +105,9 @@ export interface BackendCreateResponse {
 
 export interface BackendSchemaEntry {
   table_name: string;
+  /** Visible name (the key `table_name` can carry a "__<project>" suffix). */
+  domain_name?: string;
+  label?: string | null;
   schema:     BackendSchemaField[];
   db_backend?: "dynamodb" | "postgresql";
   versioned?: boolean;
