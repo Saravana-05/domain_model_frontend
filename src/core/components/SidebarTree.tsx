@@ -34,6 +34,7 @@ interface SidebarTreeProps {
 }
 
 const EXPANDED_KEY = "sidebar-tree-expanded";
+const ROOT_KEY = "sidebar-tree-root-open";
 
 function loadExpanded(): Set<string> {
   try {
@@ -69,6 +70,14 @@ export function SidebarTree({
   const [loading, setLoading]   = useState(false);
   const [expanded, setExpanded] = useState<Set<string>>(loadExpanded);
   const [hovered, setHovered]   = useState<string | null>(null);
+  // The "Projects" root of the tree can be collapsed as a whole (default: open).
+  const [rootOpen, setRootOpen] = useState<boolean>(() => {
+    try { return localStorage.getItem(ROOT_KEY) !== "0"; } catch { return true; }
+  });
+  const setRoot = (open: boolean) => {
+    setRootOpen(open);
+    try { localStorage.setItem(ROOT_KEY, open ? "1" : "0"); } catch { /* ignore */ }
+  };
 
   // Which "create" dialog is open: a new project, or a new module in a given project.
   const [modal, setModal] = useState<null | { kind: "project" } | { kind: "module"; projectId: string }>(null);
@@ -159,7 +168,10 @@ export function SidebarTree({
     <div>
       {/* Header: "Projects" + add + refresh */}
       <div style={styles.headerRow}>
-        <button type="button" style={styles.headerLabel} onClick={onOpenProjectsPage}>
+        <span style={styles.chevron} onClick={() => setRoot(!rootOpen)} title={rootOpen ? "Collapse" : "Expand"}>
+          {rootOpen ? <ExpandMoreIcon sx={{ fontSize: 16 }} /> : <ChevronRightIcon sx={{ fontSize: 16 }} />}
+        </span>
+        <button type="button" style={styles.headerLabel} onClick={() => { setRoot(true); onOpenProjectsPage(); }}>
           Projects
         </button>
         <button type="button" style={styles.iconBtn} title="Refresh" onClick={() => load()}>
@@ -170,6 +182,8 @@ export function SidebarTree({
         </button>
       </div>
 
+      {rootOpen && (
+      <div style={styles.treeBody}>
       {projects.length === 0 && (
         <div style={styles.empty}>No projects yet. Click + to create one.</div>
       )}
@@ -274,6 +288,8 @@ export function SidebarTree({
           {expanded.has("p:none") && tree.orphanDomains.map((d) => domainRow(d, 30))}
         </div>
       )}
+      </div>
+      )}
 
       {modal?.kind === "project" && (
         <CreateEntityModal
@@ -309,6 +325,7 @@ const styles: Record<string, React.CSSProperties> = {
   count:        { fontSize: 11, color: "#8a8398", flexShrink: 0 },
   subLabel:     { fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.8, color: "#6f6786", padding: "6px 6px 2px" },
   linkBtn:      { background: "transparent", border: "none", padding: 0, cursor: "pointer", color: "#a78bfa", fontSize: 12, fontWeight: 600 },
+  treeBody:     { marginLeft: 14, paddingLeft: 2, borderLeft: "1px solid #3b3352" },
   empty:        { fontSize: 12, color: "#6f6786", padding: "4px 10px" },
 
 };

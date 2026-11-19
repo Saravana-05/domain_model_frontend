@@ -1907,7 +1907,7 @@ function handleViewConfig(domainName: string, cfg: DomainViewConfig) {
         />
       </div>
       {tab === "data" && <DataTab schemas={liveSchemas} dbBackends={extra.dbBackends} />}
-      {tab === "translations" && <TranslationsTab schemas={liveSchemas} onSave={handleSaveTranslation} />}
+      {tab === "translations" && <TranslationsTab schemas={visibleSchemas} onSave={handleSaveTranslation} />}
       {tab === "export" && <ExportJsonTab schemas={liveSchemas} projectIds={extra.projectIds} moduleIds={extra.moduleIds} />}
 
   

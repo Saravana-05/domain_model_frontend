@@ -1,6 +1,6 @@
 import React, { useState, useMemo, useRef, useEffect } from "react";
 import { useCanDesign, DESIGNER_RESOURCE } from "../../components/Can";
-import { refreshAuthContext } from "../../api/datastoreApi";
+import { refreshAuthContext, displayDomainName } from "../../api/datastoreApi";
 import { useAuthStore } from "../../../store/authStore";
 import StorageIcon             from "@mui/icons-material/Storage";
 import LinkOutlinedIcon        from "@mui/icons-material/LinkOutlined";
@@ -170,6 +170,22 @@ export function DomainModelTab({
   const [expandedChildren, setExpandedChildren] = useState<Record<string, boolean>>({});
   const [jsonModalDomain, setJsonModalDomain] = useState<string | null>(null);
   const domainNames   = Object.keys(schemas.domains);
+
+  // Auto-created link tables (A_B holding only AId + BId) are plumbing, not
+  // something to design - hide them from this screen. Detected from the shape
+  // (so it still works after a reload), not from session memory. Explicit
+  // multi-link domains are real models and stay visible.
+  const isLinkTable = (name: string): boolean => {
+    const fields = schemas.domains[name]?.fields ?? {};
+    const keys = Object.keys(fields);
+    if (keys.length !== 2 || !keys.every((f) => f.endsWith("Id"))) return false;
+    if (Object.values(fields).some((f: any) => f.multiLinkDomain)) return false;
+    if (multiLinkDomains.has(name)) return false;
+    const [a, b] = keys.map((f) => f.slice(0, -2).toLowerCase());
+    const base = displayDomainName(name).toLowerCase();
+    return base === `${a}_${b}` || base === `${b}_${a}`;
+  };
+  const visibleDomainNames = domainNames.filter((n) => !isLinkTable(n));
   const pickerDomainNames = linkableDomainNames ?? domainNames;
 
   // Attribute-based permissions. Which domain cards have the panel open, plus a
@@ -221,12 +237,12 @@ export function DomainModelTab({
           Create Domain
         </button>
       </div>
-      {Object.keys(schemas.domains).length === 0 && (
+      {visibleDomainNames.length === 0 && (
         <div style={{ padding: "40px 0", textAlign: "center", color: "var(--color-text-secondary, #b3abc7)" }}>
           No domain models here yet. Use "Create Domain" above, or pick a different project / module from the filter.
         </div>
       )}
-      {Object.keys(schemas.domains).map((domainName) => {
+      {visibleDomainNames.map((domainName) => {
         const fields     = schemas.domains[domainName].fields;
         const fieldNames = Object.keys(fields);
         const viewCfg    = viewConfigs[domainName] ?? {};
@@ -269,7 +285,7 @@ export function DomainModelTab({
                   </button>
                 </span>
               ) : (
-                <span className="si-domain-name">{domainName}</span>
+                <span className="si-domain-name">{displayDomainName(domainName)}</span>
               )}
               <span className="si-field-count">{fieldNames.length} fields</span>
               {isMultiLink ? (
@@ -441,7 +457,7 @@ export function DomainModelTab({
                             <div className="si-edit-inline">
                               <div className="si-edit-inline-title">
                                 <EditOutlinedIcon sx={{ fontSize: 14 }} />
-                                Editing field <strong>{fieldName}</strong> in domain <strong>{domainName}</strong>
+                                Editing field <strong>{fieldName}</strong> in domain <strong>{displayDomainName(domainName)}</strong>
                               </div>
                               <FieldBuilder
                                 key={`${domainName}.${fieldName}`}
@@ -488,10 +504,10 @@ export function DomainModelTab({
                         onClick={() => setExpandedChildren((prev) => ({ ...prev, [childName]: !isExpanded }))}
                       >
                         <StorageIcon sx={{ fontSize: 14, color: "#0F6E56" }} />
-                        <span style={{ fontSize: 13, fontWeight: 500, color: "var(--color-text-primary)" }}>{childName}</span>
+                        <span style={{ fontSize: 13, fontWeight: 500, color: "var(--color-text-primary)" }}>{displayDomainName(childName)}</span>
                         <span style={{ fontSize: 11, color: "var(--color-text-secondary)" }}>{childFieldNames.length} fields</span>
                         <span style={{ fontSize: 11, background: "#F1EFE8", color: "#5F5E5A", borderRadius: 20, padding: "1px 8px", fontWeight: 500 }}>
-                          child of {domainName}
+                          child of {displayDomainName(domainName)}
                         </span>
                         <span style={{ marginLeft: "auto", color: "var(--color-text-secondary)", display: "flex", alignItems: "center" }}>
                           {isExpanded ? <ExpandLessIcon sx={{ fontSize: 16 }} /> : <ExpandMoreIcon sx={{ fontSize: 16 }} />}
@@ -519,9 +535,9 @@ export function DomainModelTab({
                             </tbody>
                           </table>
                           <div style={{ padding: "0 12px 12px 12px" }}>
-                            <AddSection label={`Add field to "${childName}"`}>
+                            <AddSection label={`Add field to "${displayDomainName(childName)}"`}>
                               <FieldBuilder
-                                submitLabel={`Add to ${childName}`}
+                                submitLabel={`Add to ${displayDomainName(childName)}`}
                                 registry={registry}
                                 domainNames={pickerDomainNames}
                                 parentDomainName={childName}
@@ -560,9 +576,9 @@ export function DomainModelTab({
 
             {!isAssociationDomain && (
               <div className="si-card-footer">
-                <AddSection label={`Add field to "${domainName}"`}>
+                <AddSection label={`Add field to "${displayDomainName(domainName)}"`}>
                   <FieldBuilder
-                    submitLabel={`Add to ${domainName}`}
+                    submitLabel={`Add to ${displayDomainName(domainName)}`}
                     registry={registry}
                     domainNames={pickerDomainNames}
                     parentDomainName={domainName}
@@ -602,12 +618,12 @@ export function DomainModelTab({
             onClick={(e) => e.stopPropagation()}
           >
             <div style={{ fontSize: 16, fontWeight: 700, marginBottom: 8 }}>
-              {confirmDel.field ? `Delete field "${confirmDel.field}"?` : `Delete domain model "${confirmDel.domain}"?`}
+              {confirmDel.field ? `Delete field "${confirmDel.field}"?` : `Delete domain model "${displayDomainName(confirmDel.domain)}"?`}
             </div>
             <div style={{ fontSize: 13, color: "var(--color-text-secondary, #b3abc7)", lineHeight: 1.5, marginBottom: 18 }}>
               {confirmDel.field
-                ? <>This removes the attribute from <strong>{confirmDel.domain}</strong>, drops its column and deletes any data stored in it.</>
-                : <>This deletes <strong>{confirmDel.domain}</strong>, its table and <strong>all its data</strong>. Junction tables and relation fields in other domains that point to it are not removed.</>}
+                ? <>This removes the attribute from <strong>{displayDomainName(confirmDel.domain)}</strong>, drops its column and deletes any data stored in it.</>
+                : <>This deletes <strong>{displayDomainName(confirmDel.domain)}</strong>, its table and <strong>all its data</strong>. Junction tables and relation fields in other domains that point to it are not removed.</>}
               {" "}This can't be undone.
             </div>
             <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
