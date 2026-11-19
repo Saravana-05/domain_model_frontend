@@ -37,6 +37,8 @@ export interface BackendSchemaField {
   relationKind?: string;           // "integral" | "association"
   relatedDomain?: string;          // the domain this field's relation points to
   relatedDomains?: string[];       // several domains linked by ONE association field — the form shows a domain picker
+  multiLinkDomain?: boolean;      // FK field belongs to an associative multi-link domain
+  linkMode?: "owns" | "uses";     // Owns / Uses label (metadata only) — read by the page builder
   validationRefs?: string[];       // attached named validation-rule tags
   // Extended metadata stored via model_config extra: allow
   component?:    string;
@@ -47,6 +49,17 @@ export interface BackendSchemaField {
   rbac?:         Record<string, any>;
   abac?:         Record<string, any>;
   [key: string]: any;              // any extra fields
+}
+
+/**
+ * Name to SHOW for a domain model. The backend key can carry a "__<projectId>"
+ * suffix (e.g. "Client__10") when another project already has a model called
+ * "Client"; users should only ever see "Client". Prefer the backend's
+ * `domain_name`, and strip the suffix as a fallback. Never use this for API calls.
+ */
+export function displayDomainName(key: string, domainName?: string | null): string {
+  const base = (domainName && domainName.trim()) ? domainName : key;
+  return base.replace(/__(?:\d+|np)(?:_\d+)?$/, "");
 }
 
 export interface BackendCreateRequest {
@@ -65,11 +78,19 @@ export interface BackendCreateRequest {
    *  project is also taken from the current selection); explicit `null`
    *  → "no module". */
   module_id?: string | number | null;
+  /** Send true when the user is CREATING a new domain model (not saving edits to
+   *  an existing one). The backend then rejects a name that already exists in the
+   *  same project (409). The same name in a DIFFERENT project is allowed. */
+  is_new?: boolean;
 }
 
 export interface BackendCreateResponse {
   status:        string;
+  /** Internal key — use this for every later API call. Equals the name unless
+   *  another project already has a model with that name (e.g. "Department__2"). */
   table_name:    string;
+  /** The name the user typed / should see (same for both projects' "Department"). */
+  domain_name?:  string;
   table_created?: boolean;   // true = just created, false = already existed
   action?:       string;     // "created" | "already existed"
   db_backend?:   string;     // "dynamodb" | "postgresql"
@@ -84,6 +105,9 @@ export interface BackendCreateResponse {
 
 export interface BackendSchemaEntry {
   table_name: string;
+  /** Visible name (the key `table_name` can carry a "__<project>" suffix). */
+  domain_name?: string;
+  label?: string | null;
   schema:     BackendSchemaField[];
   db_backend?: "dynamodb" | "postgresql";
   versioned?: boolean;
@@ -255,6 +279,9 @@ export function domainToBackendRequest(params: {
     // One association field linking SEVERAL domains: the column stores which
     // one was chosen, and this list is what the form's picker offers.
     if (fieldDef.relatedDomains && fieldDef.relatedDomains.length > 1) field.relatedDomains = fieldDef.relatedDomains;
+    if (fieldDef.multiLinkDomain) field.multiLinkDomain = true;
+    // Owns / Uses label — saved as-is so the page builder can read it.
+    if (fieldDef.linkMode) field.linkMode = fieldDef.linkMode;
 
     // Resolve registry-attached rules (validationRefs) into real, flat
     // rules the Form plugin can run. Inline validations alone were not
@@ -305,7 +332,8 @@ export function backendSchemaToFrontend(entry: BackendSchemaEntry): {
   fields:     Record<string, {
     type: string; default?: any; datasource?: string;
     cardinality?: string; relationKind?: string;
-    relatedDomain?: string; relatedDomains?: string[]; validationRefs?: string[];
+    relatedDomain?: string; relatedDomains?: string[]; multiLinkDomain?: boolean; validationRefs?: string[];
+    linkMode?: "owns" | "uses";
   }>;
   uiHints:    Record<string, Record<string, any>>;
   rbacRules:  Record<string, Record<string, any>>;
@@ -332,6 +360,8 @@ export function backendSchemaToFrontend(entry: BackendSchemaEntry): {
       // them off this returned object, so they must be passed through here.
       relatedDomain:  field.relatedDomain ?? undefined,
       relatedDomains: field.relatedDomains ?? undefined,
+      multiLinkDomain: field.multiLinkDomain ?? undefined,
+      linkMode:       field.linkMode ?? undefined,
       validationRefs: field.validationRefs ?? undefined,
     };
 

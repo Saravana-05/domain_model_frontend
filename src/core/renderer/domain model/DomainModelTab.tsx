@@ -28,6 +28,7 @@ import { buildDomainModelJson } from "./exportJson";
 import { DomainJsonModal } from "./DomainJsonModal";
 import { DomainPermissionsPanel } from "./Domainpermissionspanel";
 import type { DomainPermissionRule } from "./DomainPermissionsPanel";
+import { CreateMultiLinkDomainModal } from "./CreateMultiLinkDomainModal";
 import { useProjectStore } from "../../store/projectStore";
 
 export interface DomainModelTabProps {
@@ -43,6 +44,7 @@ export interface DomainModelTabProps {
   /** Domain to scroll into view and briefly highlight (from the sidebar tree). */
   focusDomain?:          string | null;
   junctionDomains:       Set<string>;
+  multiLinkDomains:      Set<string>;
   onAddField:            (domainName: string, fieldName: string, draft: FieldDraft) => void;
   onEditField:          (domainName: string, oldName: string, newName: string, draft: FieldDraft) => void;
   /** Delete one attribute of a domain model (backend + local state). */
@@ -66,6 +68,9 @@ export interface DomainModelTabProps {
   ) => void;
   onRedirectToCreate: (domainName: string, parentDomain?: string, fieldName?: string) => void;
   onGoToCreateDomain: () => void;
+  onCreateMultiLinkDomain: (name: string, linkedDomains: string[]) => Promise<void>;
+  /** Names offered as link targets: this module's domains plus the other modules' in the same project. */
+  linkableDomainNames?: string[];
   onAddValidationRule?: (tag: string, rule: NamedValidationRule) => void;
 
   /** domainName -> attribute-based access rules for that domain.
@@ -125,9 +130,11 @@ export function inferFieldRelation(
 }
 
 export function DomainModelTab({
-  schemas, viewConfigs, dbBackends, versioned, projectIds, moduleIds, focusDomain, junctionDomains,
+  schemas, viewConfigs, dbBackends, versioned, projectIds, moduleIds, focusDomain, junctionDomains, multiLinkDomains,
   onAddField, onEditField, onDeleteField, onDeleteDomain, onRenameDomain, onViewConfig, onSaveBackend, onQuickCreateDomain, onRedirectToCreate,
   onGoToCreateDomain,
+  onCreateMultiLinkDomain,
+  linkableDomainNames,
   onAddValidationRule,
   permissions, onChangePermissions, onSavePermissions, userAttributes, availableRoles, onLoadPermissions,
 }: DomainModelTabProps) {
@@ -140,6 +147,7 @@ export function DomainModelTab({
   // Designing (edit/delete domains + fields) needs an admin role or the
   // "domain_model" edit permission — see useCanDesign() in components/Can.tsx.
   const canManage = useCanDesign();
+  const [showCreateMultiLinkModal, setShowCreateMultiLinkModal] = useState(false);
   // Deleting a domain model is allowed for: admin system roles, anyone holding
   // "delete" on the global "domain_model" resource (same resource that gates
   // Edit), or anyone holding "delete" on that specific domain's RBAC resource.
@@ -162,6 +170,7 @@ export function DomainModelTab({
   const [expandedChildren, setExpandedChildren] = useState<Record<string, boolean>>({});
   const [jsonModalDomain, setJsonModalDomain] = useState<string | null>(null);
   const domainNames   = Object.keys(schemas.domains);
+  const pickerDomainNames = linkableDomainNames ?? domainNames;
 
   // Attribute-based permissions. Which domain cards have the panel open, plus a
   // local fallback store so the UI works before the backend is connected.
@@ -194,7 +203,15 @@ export function DomainModelTab({
 
   return (
     <div className="si-domains">
-      <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 4 }}>
+      <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginBottom: 4 }}>
+        <button
+          type="button"
+          className="page-header-btn page-header-btn--import"
+          onClick={() => setShowCreateMultiLinkModal(true)}
+        >
+          <LinkOutlinedIcon sx={{ fontSize: 17 }} />
+          Create Multi-Link Domain
+        </button>
         <button
           type="button"
           className="page-header-btn page-header-btn--import"
@@ -213,20 +230,23 @@ export function DomainModelTab({
         const fields     = schemas.domains[domainName].fields;
         const fieldNames = Object.keys(fields);
         const viewCfg    = viewConfigs[domainName] ?? {};
-        const isJunction = junctionDomains.has(domainName) &&
+        const isMultiLink = multiLinkDomains.has(domainName) ||
+          Object.values(fields).some((field) => field.multiLinkDomain);
+        const isJunction = !isMultiLink && junctionDomains.has(domainName) &&
           Object.keys(fields).length === 2 &&
           Object.keys(fields).every((f) => f.endsWith("Id"));
+        const isAssociationDomain = isJunction || isMultiLink;
         const permRuleCount = permsFor(domainName).length;
 
         return (
           <div
-            className={`si-card ${isJunction ? "si-card--junction" : ""}`}
+            className={`si-card ${isAssociationDomain ? "si-card--junction" : ""}`}
             key={domainName}
             ref={(el) => { cardRefs.current[domainName] = el; }}
             style={flash === domainName ? { outline: "2px solid #8b5cf6", outlineOffset: 2, transition: "outline-color 0.3s" } : undefined}
           >
             <div className="si-card-header">
-              <StorageIcon sx={{ fontSize: 16, color: isJunction ? "#0369a1" : "#7e22ce" }} />
+              <StorageIcon sx={{ fontSize: 16, color: isAssociationDomain ? "#0369a1" : "#7e22ce" }} />
               {renaming?.domain === domainName ? (
                 <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
                   <input
@@ -252,7 +272,11 @@ export function DomainModelTab({
                 <span className="si-domain-name">{domainName}</span>
               )}
               <span className="si-field-count">{fieldNames.length} fields</span>
-              {isJunction ? (
+              {isMultiLink ? (
+                <span className="si-layer-tag si-layer-tag--junction">
+                  <LinkOutlinedIcon sx={{ fontSize: 11 }} /> Multi-Link Domain
+                </span>
+              ) : isJunction ? (
                 <span className="si-layer-tag si-layer-tag--junction">
                   <LinkOutlinedIcon sx={{ fontSize: 11 }} /> Junction Table
                 </span>
@@ -275,7 +299,7 @@ export function DomainModelTab({
                 <Badge label={moduleName(moduleIds[domainName])} color="blue" />
               )}
               <div className="si-card-header-actions">
-                {canManage && !isJunction && (
+                {canManage && !isAssociationDomain && (
                   <button className="si-icon-btn" type="button"
                     title="Edit domain model (rename)"
                     onClick={() => setRenaming({ domain: domainName, value: domainName })}>
@@ -291,7 +315,7 @@ export function DomainModelTab({
                     <span>Delete</span>
                   </button>
                 )}
-                {!isJunction && (
+                {!isAssociationDomain && (
                   <button className="si-icon-btn" type="button"
                     title="Attribute-based access rules for this domain"
                     aria-expanded={!!permOpen[domainName]}
@@ -317,7 +341,7 @@ export function DomainModelTab({
             </div>
 
             {/* Attribute-based permissions for this domain */}
-            {permOpen[domainName] && !isJunction && (
+            {permOpen[domainName] && !isAssociationDomain && (
               <DomainPermissionsPanel
                 domainName={domainName}
                 fieldNames={fieldNames}
@@ -385,7 +409,7 @@ export function DomainModelTab({
                           )}
                         </td>
                         <td className="si-actions-cell">
-                          {!isJunction && canManage ? (
+                          {!isAssociationDomain && canManage ? (
                             <span style={{ display: "inline-flex", gap: 6 }}>
                               <button
                                 className={`si-edit-btn ${isEditing ? "si-edit-btn--active" : ""}`}
@@ -405,8 +429,8 @@ export function DomainModelTab({
                               </button>
                             </span>
                           ) : (
-                            <span style={{ fontSize: 12, color: "#9ca3af" }} title={isJunction ? "Junction fields are auto-managed" : "Sign in to edit"}>
-                              {isJunction ? "🔗" : "🔒"}
+                            <span style={{ fontSize: 12, color: "#9ca3af" }} title=                            {isAssociationDomain ? "Association fields are auto-managed" : "Sign in to edit"}>
+                            {isAssociationDomain ? "🔗" : "🔒"}
                             </span>
                           )}
                         </td>
@@ -425,7 +449,7 @@ export function DomainModelTab({
                                 initialName={fieldName}
                                 initialDraft={fieldDefToDraft(fieldDef, schemas, fp)}
                                 registry={registry}
-                                domainNames={domainNames}
+                                domainNames={pickerDomainNames}
                                 parentDomainName={domainName}
                                 onNewDomainFromRelation={onQuickCreateDomain}
                                 onAddValidationRule={onAddValidationRule}
@@ -499,7 +523,7 @@ export function DomainModelTab({
                               <FieldBuilder
                                 submitLabel={`Add to ${childName}`}
                                 registry={registry}
-                                domainNames={domainNames}
+                                domainNames={pickerDomainNames}
                                 parentDomainName={childName}
                                 onNewDomainFromRelation={onQuickCreateDomain}
                                 onAddValidationRule={onAddValidationRule}
@@ -534,13 +558,13 @@ export function DomainModelTab({
               </div>
             )} */}
 
-            {!isJunction && (
+            {!isAssociationDomain && (
               <div className="si-card-footer">
                 <AddSection label={`Add field to "${domainName}"`}>
                   <FieldBuilder
                     submitLabel={`Add to ${domainName}`}
                     registry={registry}
-                    domainNames={domainNames}
+                    domainNames={pickerDomainNames}
                     parentDomainName={domainName}
                     onNewDomainFromRelation={onQuickCreateDomain}
                     onAddValidationRule={onAddValidationRule}
@@ -558,8 +582,15 @@ export function DomainModelTab({
       })}
 
       <div className="si-tip">
-        <span>💡 Use the <strong>Create Domain</strong> tab to add a brand-new domain. Relation fields automatically generate a <strong>junction table</strong> (e.g. <code>student_subject</code>).</span>
+        <span>💡 Use <strong>Create Domain</strong> to add a domain. Ordinary relation fields keep their pairwise junction behavior; use <strong>Create Multi-Link Domain</strong> to explicitly create one association across several domains.</span>
       </div>
+
+      <CreateMultiLinkDomainModal
+        open={showCreateMultiLinkModal}
+        domainNames={pickerDomainNames}
+        onClose={() => setShowCreateMultiLinkModal(false)}
+        onCreate={onCreateMultiLinkDomain}
+      />
 
       {confirmDel && (
         <div
@@ -644,8 +675,15 @@ export function fieldDefToDraft(fieldDef: any, schemas: AllSchemas, fullPath: st
     listDomain:     (fieldDef as any).listDomain     ?? "",
     validationRefs: valRefs,
     validations:    [],
-    isPartOf:       isExistingDomainRelation ? "fk" : true,
+    // Only a REAL FK column (named `${relatedDomain}Id`) is a belongs-to link.
+    // Any other relation field (e.g. "cutomers") is a display-only association
+    // marker — edit it as an association so saving keeps the typed name and
+    // never adds a `${relatedDomain}Id` column.
+    isPartOf:       isExistingDomainRelation
+      ? (fieldId.toLowerCase() === `${relatedDomain}Id`.toLowerCase() ? "fk" : false)
+      : true,
     relationKind:   (fieldDef as any).relationKind === "integral" ? "integral" : "association",
+    linkMode:       (fieldDef as any).linkMode === "owns" ? "owns" : (fieldDef as any).linkMode === "uses" ? "uses" : undefined,
     exprStr:        comp?.expression ?? "",
     depsStr:        comp?.dependsOn?.join(", ") ?? "",
     component:       (uiHint.component ?? "text") as ComponentType,

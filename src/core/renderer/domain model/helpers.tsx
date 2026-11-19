@@ -36,6 +36,8 @@ export function buildJunctionDomain(
   /** "list" = a record can link to MANY related records (the form then
    *  offers "+ Add"); otherwise the form shows a single normal entry. */
   cardinality?: string,
+  /** Owns / Uses label — stored on the owning FK column, metadata only. */
+  linkMode?: "owns" | "uses",
 ): DomainDefinition {
   const junctionName = `${parentDomainName}_${relatedDomainName}`;
   const parentIdField  = `${parentDomainName}Id`;
@@ -43,7 +45,7 @@ export function buildJunctionDomain(
   return {
     name: junctionName,
     fields: {
-      [parentIdField]:  { type: "string" },
+      [parentIdField]:  linkMode ? { type: "string", linkMode } : { type: "string" },
       [relatedIdField]: cardinality ? { type: "string", cardinality: cardinality as any } : { type: "string" },
     },
   };

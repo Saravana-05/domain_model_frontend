@@ -18,6 +18,7 @@ export function draftToDomainFieldCore(draft: FieldDraft): DomainFieldCore {
     relatedDomain:  draft.type === "relation" && draft.relatedDomain ? draft.relatedDomain : undefined,
     relatedDomains: draft.type === "relation" && (draft.relatedDomains?.length ?? 0) > 1 ? draft.relatedDomains : undefined,
     listDomain:     draft.type === "list"     && draft.listDomain     ? draft.listDomain     : undefined,
+    linkMode:       draft.type === "relation" ? draft.linkMode : undefined,
     validationRefs: refs.length ? refs : undefined,
     validations:    vRules.length ? vRules : undefined,
     cardinality:    (draft.cardinality as "one" | "many" | "list" | undefined) || undefined,

@@ -8,12 +8,15 @@ import AddIcon                from "@mui/icons-material/Add";
 import RefreshIcon            from "@mui/icons-material/Refresh";
 import { useProjectStore } from "../../core/store/projectStore";
 import { apiListAllModules, apiCreateModule, type BackendModule } from "../api/moduleApi";
-import { apiListSchemas } from "../api/datastoreApi";
+import { apiListSchemas, displayDomainName } from "../api/datastoreApi";
 import { CreateEntityModal } from "./CreateEntityModal";
 
 /** One domain model as the tree needs it. */
 interface TreeDomain {
+  /** Internal key (backend table_name) - used for selection and every API call. */
   name:      string;
+  /** Visible name; can differ from the key when another project has the same name. */
+  display:   string;
   /** Business name typed by the user (e.g. "Client Details"). */
   label?:    string;
   projectId: string | null;
@@ -95,7 +98,8 @@ export function SidebarTree({
       setModules(mods.data ?? []);
       setDomains(
         ((schemas as any).schemas ?? []).map((s: any) => ({
-          name:      s.table_name,
+          name:      s.table_name,                       // internal key - used for every API call
+          display:   displayDomainName(s.table_name, s.domain_name),   // what the user should see
           label:     s.label ?? undefined,
           projectId: s.project_id ?? null,
           moduleId:  s.module_id ?? null,
@@ -141,13 +145,13 @@ export function SidebarTree({
   const domainRow = (d: TreeDomain, indent: number) => (
     <div
       key={`d:${d.name}`}
-      title={d.label && d.label !== d.name ? `${d.label} (${d.name})` : d.name}
+      title={d.label && d.label !== d.display ? `${d.label} (${d.display})` : d.display}
       style={{ ...styles.row, paddingLeft: indent, ...(activeDomain === d.name ? styles.rowActive : {}) }}
       onClick={() => onSelectDomain(d)}
     >
       <span style={styles.chevronSpacer} />
       <TableChartOutlinedIcon sx={{ fontSize: 14 }} style={{ flexShrink: 0, color: "#7dd3fc" }} />
-      <span style={styles.label}>{d.label || d.name}</span>
+      <span style={styles.label}>{d.label || d.display}</span>
     </div>
   );
 

@@ -184,6 +184,27 @@ export const SchemaInspector = forwardRef<SchemaInspectorHandle, SchemaInspector
   const liveSchemas = useMemo(() => mergeAll(baseSchemas, extra), [baseSchemas, extra]);
   const liveDomainNames = useMemo(() => Object.keys(liveSchemas.domains), [liveSchemas]);
 
+  // Domain models living in OTHER modules of the current project. They are
+  // not part of liveSchemas (the module filter scopes the backend load), but
+  // they must be selectable as link targets, so fetch just their names.
+  const [projectDomainNames, setProjectDomainNames] = useState<string[]>([]);
+  useEffect(() => {
+    if (!currentProjectId || !currentModuleId) { setProjectDomainNames([]); return; }
+    let cancelled = false;
+    apiListSchemas(currentProjectId, null)
+      .then((res) => {
+        if (cancelled) return;
+        setProjectDomainNames(res.status === "success" ? (res.schemas ?? []).map((e) => e.table_name) : []);
+      })
+      .catch(() => { if (!cancelled) setProjectDomainNames([]); });
+    return () => { cancelled = true; };
+  }, [currentProjectId, currentModuleId, extra.newDomains.length]);
+  // Names offered by the link pickers: this module's domains + the rest of the project's.
+  const linkableDomainNames = useMemo(
+    () => Array.from(new Set([...liveDomainNames, ...projectDomainNames])),
+    [liveDomainNames, projectDomainNames],
+  );
+
   // What the Domain Model page's project filter (top-right, App.tsx) should
   // actually show. Backend-sourced domains are already scoped server-side
   // (apiListSchemas' project_id query param) and pruned client-side in
@@ -297,6 +318,67 @@ async function handleQuickCreateDomain(name: string, fields: QuickCreateField[])
     } catch (err: any) {
       setBackendLoadStatus(`⚠️ Domain "${name}" added to schema but backend unreachable: ${err?.message}`);
     }
+    setTimeout(() => setBackendLoadStatus(null), 4000);
+  }
+
+  async function handleCreateMultiLinkDomain(name: string, linkedDomains: string[]) {
+    if (linkedDomains.length < 2) {
+      throw new Error("Select at least two domains to create a multi-link domain.");
+    }
+
+    const cachedFields = extra.newDomains.find((domain) => domain.name === name)?.fields ?? {};
+    const existingFields: Record<string, DomainFieldCore> = {};
+    for (const [fieldName, field] of Object.entries(cachedFields)) {
+      existingFields[fieldName] = { ...field };
+    }
+    for (const [fieldName, field] of Object.entries(liveSchemas.domains[name]?.fields ?? {})) {
+      existingFields[fieldName] = { ...existingFields[fieldName], ...field } as DomainFieldCore;
+      const validationRefs = liveSchemas._layers?.validationRefs?.[`${name}.${fieldName}`];
+      if (validationRefs?.length) existingFields[fieldName].validationRefs = validationRefs;
+    }
+
+    for (const linkedDomain of linkedDomains) {
+      const fieldName = `${linkedDomain}Id`;
+      existingFields[fieldName] = {
+        ...existingFields[fieldName],
+        type: "string",
+        relatedDomain: linkedDomain,
+        relationKind: "association",
+        multiLinkDomain: true,
+      };
+    }
+
+    const req = domainToBackendRequest({
+      registry: liveSchemas._layers?.validationRegistry ?? {},
+      domainName: name,
+      fields: existingFields,
+      uiHints: liveSchemas._layers?.ui ?? {},
+      rbacRules: liveSchemas._layers?.rbac?.fields ?? {},
+      abacRules: liveSchemas._layers?.abac?.rules ?? {},
+      db_backend: extra.dbBackends[name] === "dynamodb" ? "dynamodb" : "postgresql",
+      versioned: extra.versioned[name],
+    });
+    const res = await apiCreateDomain(req);
+    if (res.status !== "success") {
+      throw new Error(res.message || `Could not create multi-link domain "${name}".`);
+    }
+
+    setExtra((prev) => ({
+      ...prev,
+      newDomains: [
+        ...prev.newDomains.filter((domain) => domain.name !== name),
+        { name, fields: existingFields },
+      ],
+      dbBackends: { ...prev.dbBackends, [name]: res.db_backend ?? extra.dbBackends[name] ?? "postgresql" },
+      projectIds: prev.projectIds[name] || !currentProjectId
+        ? prev.projectIds
+        : { ...prev.projectIds, [name]: currentProjectId },
+      moduleIds: prev.moduleIds[name] || !currentModuleId
+        ? prev.moduleIds
+        : { ...prev.moduleIds, [name]: currentModuleId },
+    }));
+
+    setBackendLoadStatus(`✅ Multi-link domain "${name}" created or updated.`);
     setTimeout(() => setBackendLoadStatus(null), 4000);
   }
 
@@ -578,16 +660,59 @@ const handleRedirectToCreate = (domainName: string, parentDomain?: string, field
   }
   setTab("create");
 };
-  // ── Core junction creation helper ─────────────────────────────────────────
+  // ── Owns / Uses label on an EXISTING junction table ───────────────────────
+// Metadata only: re-saves the junction with `linkMode` on its owning FK
+// column (e.g. Employeees_Customerss.EmployeeesId) so the page builder can
+// read it. Columns and table structure are untouched. No-op when the label
+// is unchanged or the junction isn't loaded.
+async function syncJunctionLinkMode(
+  junctionName: string,
+  ownerIdField: string,
+  linkMode: "owns" | "uses" | undefined,
+  dbBackend: string,
+) {
+  if (!linkMode) return;
+  const fields = liveSchemas.domains[junctionName]?.fields as Record<string, DomainFieldCore> | undefined;
+  if (!fields || !fields[ownerIdField] || (fields[ownerIdField] as any).linkMode === linkMode) return;
+  const updated: Record<string, DomainFieldCore> = {
+    ...fields,
+    [ownerIdField]: { ...fields[ownerIdField], linkMode },
+  };
+  setExtra((prev) => ({
+    ...prev,
+    newDomains: [
+      ...prev.newDomains.filter((d) => d.name !== junctionName),
+      { name: junctionName, fields: updated },
+    ],
+  }));
+  try {
+    const req = domainToBackendRequest({
+      registry: liveSchemas._layers?.validationRegistry ?? {},
+      domainName: junctionName,
+      fields: updated as any,
+      uiHints: {}, rbacRules: {}, abacRules: {},
+      db_backend: dbBackend as any,
+    });
+    await apiCreateDomain(req);
+  } catch (err: any) {
+    console.warn(`Could not save Owns/Uses label on "${junctionName}":`, err?.message);
+  }
+}
+
+// ── Core junction creation helper ─────────────────────────────────────────
 async function ensureJunctionDomain(
   parentDomainName: string,
   relatedDomainName: string,
   dbBackend: string,
   cardinality?: string,
+  linkMode?: "owns" | "uses",
 ): Promise<JunctionResult> {
   const pairKey = [parentDomainName, relatedDomainName].sort().join("__");
   const junctionName = `${parentDomainName}_${relatedDomainName}`;
-  if (extra.junctionPairs.has(pairKey)) return { name: junctionName, status: "skipped" }; // ✅ deduplicate
+  if (extra.junctionPairs.has(pairKey)) {
+    await syncJunctionLinkMode(junctionName, `${parentDomainName}Id`, linkMode, dbBackend);
+    return { name: junctionName, status: "skipped" }; // ✅ deduplicate
+  }
 
   // The same pair may already exist under the reverse name (B_A when we'd
   // create A_B) — e.g. after a reload, when junctionPairs is empty again.
@@ -596,10 +721,11 @@ async function ensureJunctionDomain(
   const reverseFields = Object.keys(liveSchemas.domains[reverseName]?.fields ?? {}).sort().join(",");
   const expectedPair  = [`${parentDomainName}Id`, `${relatedDomainName}Id`].sort().join(",");
   if (reverseFields && reverseFields === expectedPair) {
+    await syncJunctionLinkMode(reverseName, `${parentDomainName}Id`, linkMode, dbBackend);
     return { name: reverseName, status: "exists", message: `"${reverseName}" already links these two domains` };
   }
 
-  const jd = buildJunctionDomain(parentDomainName, relatedDomainName, cardinality);
+  const jd = buildJunctionDomain(parentDomainName, relatedDomainName, cardinality, linkMode);
 
   // Always build rd with parent fields
   // If cbranch was quick-created with empty fields, use parent fields
@@ -690,7 +816,7 @@ async function ensureJunctionsFor(
   ));
   const results: JunctionResult[] = [];
   for (const related of targets) {
-    results.push(await ensureJunctionDomain(domainName, related, dbBackend, draft.cardinality || undefined));
+    results.push(await ensureJunctionDomain(domainName, related, dbBackend, draft.cardinality || undefined, draft.linkMode));
   }
   if (targets.length > 1) {
     const failed  = results.filter((r) => r.status === "failed");
@@ -862,7 +988,7 @@ if (draft.isPartOf === "fk") {
               ...prev.extraFields,
               [draft.relatedDomain]: {
                 ...(prev.extraFields[draft.relatedDomain] ?? {}),
-                [parentIdField]: { type: "string", relationKind: "integral", cardinality: (draft.cardinality as any) || undefined },
+                [parentIdField]: { type: "string", relationKind: "integral", linkMode: draft.linkMode, cardinality: (draft.cardinality as any) || undefined },
               },
             },
           }));
@@ -874,7 +1000,7 @@ if (draft.isPartOf === "fk") {
               // (e.g. branch.clinicId → clinic) — the child only ever
               // exists under its parent, so the view-builder hides
               // Add Existing / Remove for it and only allows Create.
-              [parentIdField]: { type: "string" as FieldType, relationKind: "integral", cardinality: (draft.cardinality as any) || undefined },
+              [parentIdField]: { type: "string" as FieldType, relationKind: "integral", linkMode: draft.linkMode, cardinality: (draft.cardinality as any) || undefined },
             };
             const req = domainToBackendRequest({
               registry: liveSchemas._layers?.validationRegistry ?? {},
@@ -1024,6 +1150,18 @@ if (draft.isPartOf === "fk") {
       } else if (!draft.isPartOf) {
         // ❌ UNCHECKED — create junction table(s)
         await ensureJunctionsFor(domainName, draft, dbBackend);
+        // Keep the field under the name the user typed (display-only marker,
+        // never a column) — it was dropped from state above, so put it back
+        // and persist it, replacing the old name on a rename.
+        if (isRename) removeRelationMarker(domainName, oldName);
+        saveRelationMarker(domainName, newName, updatedField);
+        setExtra((prev) => ({
+          ...prev,
+          extraFields: {
+            ...prev.extraFields,
+            [domainName]: { ...(prev.extraFields[domainName] ?? {}), [newName]: updatedField },
+          },
+        }));
       } else {
         // ✅ CHECKED — add domainNameId into child (relatedDomain) table only
         const parentIdField = `${domainName}Id`;
@@ -1033,7 +1171,7 @@ if (draft.isPartOf === "fk") {
             ...prev.extraFields,
             [draft.relatedDomain]: {
               ...(prev.extraFields[draft.relatedDomain] ?? {}),
-              [parentIdField]: { type: "string", relationKind: "integral", cardinality: (draft.cardinality as any) || undefined },
+              [parentIdField]: { type: "string", relationKind: "integral", linkMode: draft.linkMode, cardinality: (draft.cardinality as any) || undefined },
             },
           },
         }));
@@ -1045,7 +1183,7 @@ if (draft.isPartOf === "fk") {
             // (e.g. branch.clinicId → clinic) — the child only ever
             // exists under its parent, so the view-builder hides
             // Add Existing / Remove for it and only allows Create.
-            [parentIdField]: { type: "string" as FieldType, relationKind: "integral", cardinality: (draft.cardinality as any) || undefined },
+            [parentIdField]: { type: "string" as FieldType, relationKind: "integral", linkMode: draft.linkMode, cardinality: (draft.cardinality as any) || undefined },
           };
           const req = domainToBackendRequest({
             registry: liveSchemas._layers?.validationRegistry ?? {},
@@ -1585,6 +1723,8 @@ function handleViewConfig(domainName: string, cfg: DomainViewConfig) {
                 // different function.
                 relatedDomain: (v as any).relatedDomain,
                 relatedDomains: (v as any).relatedDomains,
+                multiLinkDomain: v.multiLinkDomain,
+                linkMode: (v as any).linkMode,
                 cardinality: (v as any).cardinality,
                 // Same gap, one more field: validationRefs (the tag
                 // names, e.g. ["required-name"]) was never carried
@@ -1694,6 +1834,12 @@ function handleViewConfig(domainName: string, cfg: DomainViewConfig) {
           projectIds={extra.projectIds}
           moduleIds={extra.moduleIds}
           focusDomain={focusDomain}
+          linkableDomainNames={linkableDomainNames}
+          multiLinkDomains={new Set(
+            Object.entries(visibleSchemas.domains)
+              .filter(([, domain]) => Object.values(domain.fields).some((field) => field.multiLinkDomain))
+              .map(([name]) => name)
+          )}
          junctionDomains={new Set(
   Array.from(extra.junctionPairs).flatMap((pairKey) => {
     const parts = pairKey.split("__");
@@ -1713,6 +1859,7 @@ function handleViewConfig(domainName: string, cfg: DomainViewConfig) {
           onRichCreateDomain={handleRichCreateDomain}
           onRedirectToCreate={handleRedirectToCreate}
           onGoToCreateDomain={() => setTab("create")}
+          onCreateMultiLinkDomain={handleCreateMultiLinkDomain}
           onAddValidationRule={handleAddValidationRule}
           availableRoles={availableRoles}
           permissions={permissions}
@@ -1748,7 +1895,7 @@ function handleViewConfig(domainName: string, cfg: DomainViewConfig) {
         <CreateDomainTab
           onAdd={handleDomainCreated}
           registry={liveSchemas._layers?.validationRegistry ?? {}}
-          domainNames={liveDomainNames}
+          domainNames={linkableDomainNames}
           onQuickCreateDomain={handleQuickCreateDomain}
           onRichCreateDomain={handleRichCreateDomain}
           schemas={liveSchemas}
