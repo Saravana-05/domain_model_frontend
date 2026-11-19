@@ -1551,3 +1551,8 @@ body {
 .si-table td.si-actions-cell { background: var(--surface); }
 .si-table th.si-actions-cell { background: var(--surface-alt); }
 .si-table tr:hover td.si-actions-cell { background: var(--surface-alt); }
+/* Sidebar scrollbar: dark, thin, blends with the sidebar instead of the default white track */
+aside nav::-webkit-scrollbar { width: 6px; }
+aside nav::-webkit-scrollbar-track { background: transparent; }
+aside nav::-webkit-scrollbar-thumb { background: #4a4060; border-radius: 6px; }
+aside nav::-webkit-scrollbar-thumb:hover { background: #6b5f8a; }

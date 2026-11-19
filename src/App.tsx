@@ -13,6 +13,7 @@ import { ModulesScreen } from "./screens/ModulesScreen";
 import CloudUploadOutlinedIcon from "@mui/icons-material/CloudUploadOutlined";
 import CodeIcon                from "@mui/icons-material/Code";
 import FilterListIcon          from "@mui/icons-material/FilterList";
+import KeyboardArrowDownIcon   from "@mui/icons-material/KeyboardArrowDown";
 import "./App.css";
 
 type Screen = "projects" | "modules" | "inspector" | "rbac";
@@ -27,7 +28,7 @@ const NAV_ITEMS: { id: Screen; label: string; group?: string }[] = [
  *  from the backend, no losing in-progress edits) and just tells it which
  *  tab to show, the same way the header's "Export" button already does. */
 const INSPECTOR_TABS: { id: MainTab; label: string }[] = [
-  { id: "domain",       label: "Domain Model" },
+  // "Domain Model" lives in the Projects tree (project > module > domain model), so no menu item.
   // { id: "ui",           label: "UI Config" },
   { id: "validations",  label: "Validations" },
   // { id: "access",       label: "Access Control" },
@@ -64,6 +65,7 @@ function ScopeFilter({
   allLabel,
   fallbackLabel,
   emptyLabel,
+  caption,
 }: {
   items: { id: string; name: string }[];
   currentId: string | null;
@@ -71,6 +73,8 @@ function ScopeFilter({
   allLabel: string;
   fallbackLabel: string;
   emptyLabel: string;
+  /** small prefix shown inside the button, e.g. "Project" */
+  caption?: string;
 }) {
   const [open, setOpen] = useState(false);
   const boxRef = useRef<HTMLDivElement>(null);
@@ -95,7 +99,9 @@ function ScopeFilter({
         onClick={() => setOpen((v) => !v)}
       >
         <FilterListIcon sx={{ fontSize: 17 }} />
+        {caption && <span style={{ opacity: 0.6, fontWeight: 500 }}>{caption}:</span>}
         {currentLabel}
+        <KeyboardArrowDownIcon sx={{ fontSize: 18 }} />
       </button>
       {open && (
         <div style={styles.filterDropdown}>
@@ -260,7 +266,7 @@ export default function App() {
             onOpenProjectsPage={() => setScreen("projects")}
           />
 
-          <div style={styles.navGroup}>Domain Model</div>
+          <div style={styles.navGroup}>Configuration</div>
           {INSPECTOR_TABS.map((item) => (
             <button
               key={item.id}
@@ -327,7 +333,7 @@ export default function App() {
                 </p>
               </div>
               <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
-                {inspectorTab === "domain" && (
+                {(inspectorTab === "domain" || inspectorTab === "translations") && (
                   <>
                     <ScopeFilter
                       items={projects}
@@ -336,6 +342,7 @@ export default function App() {
                       allLabel="All Projects"
                       fallbackLabel="Project"
                       emptyLabel="No projects yet"
+                      caption="Project"
                     />
                     {currentProjectId && (
                       <ScopeFilter
@@ -345,6 +352,7 @@ export default function App() {
                         allLabel="All Modules"
                         fallbackLabel="Module"
                         emptyLabel="No modules in this project"
+                        caption="Module"
                       />
                     )}
                   </>
@@ -398,7 +406,7 @@ const styles: Record<string, React.CSSProperties> = {
   brand:        { display: "flex", alignItems: "center", gap: 10, padding: "20px 16px", borderBottom: "1px solid rgba(255,255,255,0.08)" },
   brandIcon:    { fontSize: 22 },
   brandName:    { color: "#f5f3fa", fontWeight: 700, fontSize: 16 },
-  nav:          { flex: 1, padding: "12px 8px", display: "flex", flexDirection: "column", gap: 2, overflowY: "auto" },
+  nav:          { flex: 1, padding: "12px 8px", display: "flex", flexDirection: "column", gap: 2, overflowY: "auto", scrollbarWidth: "thin", scrollbarColor: "#4a4060 transparent" },
   navGroup:     { padding: "14px 8px 4px", fontSize: 11, fontWeight: 700, color: "#a78bfa", textTransform: "uppercase", letterSpacing: 1 },
   navItem:      { width: "100%", textAlign: "left", padding: "9px 12px", borderRadius: 8, border: "none", background: "transparent", color: "#b3abc7", fontSize: 14, cursor: "pointer", transition: "background 0.15s" },
   navItemWithIcon: { display: "flex", alignItems: "center", gap: 8 },

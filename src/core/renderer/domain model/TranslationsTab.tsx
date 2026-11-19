@@ -3,6 +3,7 @@ import StorageIcon      from "@mui/icons-material/Storage";
 import CheckIcon        from "@mui/icons-material/Check";
 import SaveOutlinedIcon from "@mui/icons-material/SaveOutlined";
 import type { AllSchemas } from "../../schema/types";
+import { displayDomainName } from "../../api/datastoreApi";
 
 export interface TranslationsTabProps {
   schemas: AllSchemas;
@@ -45,11 +46,14 @@ async function handleSave(domainName: string, fieldName: string, path: string) {
 
   return (
     <div className="si-domains">
+      {Object.keys(schemas.domains).length === 0 && (
+        <div style={{ padding: 16, color: "#8a8398", fontSize: 13 }}>No domain models in this project / module.</div>
+      )}
       {Object.entries(schemas.domains).map(([domainName, domainDef]) => (
         <div className="si-card" key={domainName}>
           <div className="si-card-header">
             <StorageIcon sx={{ fontSize: 16, color: "#7e22ce" }} />
-            <span className="si-domain-name">{domainName}</span>
+            <span className="si-domain-name">{displayDomainName(domainName)}</span>
             <span className="si-field-count">{Object.keys(domainDef.fields).length} fields</span>
             <span className="si-layer-tag si-layer-tag--ui">Translations</span>
           </div>
