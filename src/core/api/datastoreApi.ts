@@ -26,7 +26,7 @@ function resolveToken(): string | null {
 // Backend wire types (match the FastAPI SchemaField Pydantic model)
 // ════════════════════════════════════════════════════════════════════════════
 
-export type BackendFieldType = "text" | "number" | "boolean" | "date" | "formattedText";
+export type BackendFieldType = "text" | "number" | "boolean" | "date" | "formattedText" | "domain_model";
 
 export interface BackendSchemaField {
   field_id:      string;
@@ -141,6 +141,7 @@ export interface BackendRowsResponse {
 /** Map frontend FieldType → backend field type */
 export function frontendTypeToBackend(type: string): BackendFieldType {
   switch (type) {
+    case "relation": return "domain_model"; // field tagged as a domain model (FK / link to another domain)
     case "string":  return "text";
     case "email":   return "text"; // backend has no email type — persisted as text + format:"email"
     case "number":  return "number";
@@ -158,6 +159,7 @@ export function backendTypeToFrontend(type: BackendFieldType): string {
     case "number":        return "number";
     case "boolean":       return "boolean";
     case "date":          return "date";
+    case "domain_model":  return "relation";
     default:              return "string";
   }
 }
@@ -254,7 +256,12 @@ export function domainToBackendRequest(params: {
 
     const field: BackendSchemaField = {
       field_id: fieldName,
-      type:     frontendTypeToBackend(fieldDef.type),
+      // A field tagged as a domain model keeps that type. Besides type "relation",
+      // fields that carry relation metadata (FK columns are plain "string" fields
+      // with relationKind / relatedDomain) are persisted as "domain_model" too.
+      type:     (fieldDef.type === "relation" || fieldDef.relationKind || fieldDef.relatedDomain)
+                  ? "domain_model"
+                  : frontendTypeToBackend(fieldDef.type),
       label:    ui?.label ?? fieldName,
       value:    fieldDef.default ?? null,
     };
