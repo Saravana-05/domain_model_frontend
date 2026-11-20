@@ -200,10 +200,18 @@ export const SchemaInspector = forwardRef<SchemaInspectorHandle, SchemaInspector
     return () => { cancelled = true; };
   }, [currentProjectId, currentModuleId, extra.newDomains.length]);
   // Names offered by the link pickers: this module's domains + the rest of the project's.
-  const linkableDomainNames = useMemo(
-    () => Array.from(new Set([...liveDomainNames, ...projectDomainNames])),
-    [liveDomainNames, projectDomainNames],
-  );
+  // Domains that belong to a DIFFERENT project (they can linger in liveSchemas
+  // from an earlier unscoped / other-project load) must not be offered as link
+  // targets, so keep only this project's (or not-yet-tagged, i.e. new) ones.
+  const linkableDomainNames = useMemo(() => {
+    const live = currentProjectId
+      ? liveDomainNames.filter((n) => {
+          const pid = extra.projectIds[n];
+          return pid == null || String(pid) === String(currentProjectId);
+        })
+      : liveDomainNames;
+    return Array.from(new Set([...live, ...projectDomainNames]));
+  }, [liveDomainNames, projectDomainNames, currentProjectId, extra.projectIds]);
 
   // What the Domain Model page's project filter (top-right, App.tsx) should
   // actually show. Backend-sourced domains are already scoped server-side

@@ -11,6 +11,7 @@ import type { QuickCreateField } from "./DomainPickers";
 import { ValidationRefPicker } from "./ValidationRefPicker";
 import { NewRegistryRuleForm } from "./NewRegistryRuleForm";
 import { toPascalCase, toCamelCase } from "./helpers";
+import { displayDomainName } from "../../api/datastoreApi";
 
 export interface FieldBuilderProps {
   submitLabel:    string;
@@ -138,11 +139,16 @@ const [fieldName, setFieldName] = useState(initialName);
       finalDraft = {
         ...finalDraft,
         // "__new__:..." sentinels resolve (and PascalCase) inside
-        // resolveRelatedDomain; plain picks are an existing domain name
-        // already stored correctly, so PascalCase is a no-op there.
+        // resolveRelatedDomain. A pick of an EXISTING domain must keep its exact
+        // storage key: keys like "User__11" are NOT PascalCase-stable
+        // (toPascalCase turns them into "User11", a domain that doesn't exist,
+        // which then got auto-created). Only a typed, not-yet-existing name is
+        // normalised.
         relatedDomain: finalDraft.relatedDomain.startsWith("__new__:")
           ? resolveRelatedDomain(finalDraft.relatedDomain)
-          : toPascalCase(finalDraft.relatedDomain),
+          : domainNames.includes(finalDraft.relatedDomain)
+            ? finalDraft.relatedDomain
+            : toPascalCase(finalDraft.relatedDomain),
         isPartOf: isPartOfRef.current,
         // Editing keeps an existing multi-domain list only while the primary
         // domain is unchanged; adding builds the list in submit() instead.
@@ -177,7 +183,7 @@ const [fieldName, setFieldName] = useState(initialName);
     draft.isPartOf !== "fk";
   const linkedExtras = canMultiLink
     ? Array.from(new Set(extraDomains)).filter(
-        (d) => d !== draft.relatedDomain && d !== parentDomainName && !d.includes("_") && domainNames.includes(d),
+        (d) => d !== draft.relatedDomain && d !== parentDomainName && !displayDomainName(d).includes("_") && domainNames.includes(d),
       )
     : [];
   const isMulti = linkedExtras.length > 0;
@@ -187,7 +193,18 @@ const [fieldName, setFieldName] = useState(initialName);
   // draft.relatedDomain; the rest live in extraDomains.
   // Junction tables (named "A_B" — domain names themselves never contain an
   // underscore, they're stored PascalCase) can't be a relation target.
-  const pickableDomains = domainNames.filter((d) => d !== parentDomainName && !d.includes("_"));
+  // NOTE: the storage KEY of a domain can end in "__<projectId>" (e.g. the
+  // IDAM "User" model is stored as "User__5" when another project already
+  // owns the key "User"), so the check must run on the visible name.
+  const pickableDomains = domainNames.filter((d) => d !== parentDomainName && !displayDomainName(d).includes("_"));
+  // Two domains can share a visible name (different projects, or a leftover
+  // copy) while having different storage keys — show the key for those so
+  // they can be told apart.
+  const domainLabel = (d: string): string => {
+    const vis = displayDomainName(d);
+    const clash = domainNames.filter((x) => displayDomainName(x) === vis).length > 1;
+    return clash ? `${vis} (${d})` : vis;
+  };
   const selectedDomains = canMultiLink ? [draft.relatedDomain, ...linkedExtras] : [];
   const pendingNewDomain = draft.relatedDomain !== "" && !domainNames.includes(draft.relatedDomain);
 
@@ -365,7 +382,7 @@ const [fieldName, setFieldName] = useState(initialName);
                 style={{ textAlign: "left", cursor: "pointer", minWidth: 190, maxWidth: 280, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
               >
                 {selectedDomains.length > 0
-                  ? selectedDomains.join(", ")
+                  ? selectedDomains.map((d) => domainLabel(d)).join(", ")
                   : pendingNewDomain ? `New: ${draft.relatedDomain}` : "-- Select domain(s) --"}
               </button>
               {pickerOpen && (
@@ -376,7 +393,7 @@ const [fieldName, setFieldName] = useState(initialName);
                   {pickableDomains.map((d) => (
                     <label key={d} className="si-multi-item">
                       <input type="checkbox" checked={selectedDomains.includes(d)} onChange={() => toggleDomain(d)} />
-                      <span>{d}</span>
+                      <span>{domainLabel(d)}</span>
                     </label>
                   ))}
                   <button type="button" className="si-multi-new" onClick={pickNewDomain}>
@@ -420,7 +437,7 @@ const [fieldName, setFieldName] = useState(initialName);
               >
                 <option value="">-- Select domain --</option>
                 {domainNames.filter((d) => d !== parentDomainName).map((d) => (
-                  <option key={d} value={d}>{d}</option>
+                  <option key={d} value={d}>{domainLabel(d)}</option>
                 ))}
                 <option value="__new__">➕ Create New Domain</option>
               </select>
