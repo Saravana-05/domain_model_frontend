@@ -1182,6 +1182,33 @@ if (draft.isPartOf === "fk") {
             [domainName]: { ...(prev.extraFields[domainName] ?? {}), [newName]: updatedField },
           },
         }));
+        // Also write the edited link into THIS domain's stored schema. The
+        // generic save below is skipped for relation fields, so without this
+        // the backend never learned about changes like cardinality "list"
+        // (the View Builder reads the stored schema and showed a single select).
+        try {
+          const storedFields: Record<string, any> = { ...(liveSchemas.domains[domainName]?.fields ?? {}) };
+          if (isRename) delete storedFields[oldName];
+          storedFields[newName] = { ...updatedField, relationKind: "association" };
+          const storedUIHints = { ...(liveSchemas.uiHints ?? {}) } as Record<string, any>;
+          if (isRename && storedUIHints[oldPath]) { storedUIHints[newPath] = storedUIHints[oldPath]; delete storedUIHints[oldPath]; }
+          if (Object.values(uiHint).some((v) => v !== undefined)) storedUIHints[newPath] = uiHint;
+          const linkReq = domainToBackendRequest({
+            registry: liveSchemas._layers?.validationRegistry ?? {},
+            domainName, fields: storedFields as any, uiHints: storedUIHints as any,
+            rbacRules: extra.rbacRules as any, abacRules: extra.abacRules as any,
+            db_backend: dbBackend as any,
+          });
+          const linkRes = await apiCreateDomain(linkReq);
+          setBackendLoadStatus(
+            linkRes.status === "success"
+              ? `✅ Link "${newName}" saved to "${domainName}".`
+              : `⚠️ Link saved locally, but backend: ${linkRes.message}`,
+          );
+        } catch (err: any) {
+          setBackendLoadStatus(`⚠️ Link saved locally, but backend unreachable: ${err?.message}`);
+        }
+        setTimeout(() => setBackendLoadStatus(null), 5000);
       } else {
         // ✅ CHECKED — add domainNameId into child (relatedDomain) table only
         const parentIdField = `${domainName}Id`;
