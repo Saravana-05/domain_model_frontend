@@ -15,6 +15,11 @@ import {
   backendSchemaToFrontend,
   apiCreateDomain,
   apiListSchemas,
+  apiDeleteDomain,
+  apiDeleteField,
+  apiUpdateDomain,
+  apiUpdateField,
+  frontendTypeToBackend,
   apiSaveAttribute,
   apiSaveAttributeTranslation,
   apiListValidationRules,
@@ -24,7 +29,7 @@ import {
 } from "../../api/datastoreApi";
 
 import { type ExtraSchemaState, EMPTY_EXTRA, mergeAll } from "./mergeSchemas";
-import { dbLocation, buildJunctionDomain, primaryLabel, LANG_ORDER } from "./helpers";
+import { dbLocation, buildJunctionDomain, primaryLabel, LANG_ORDER, type JunctionResult } from "./helpers";
 import { DomainModelTab } from "./DomainModelTab";
 import { UIConfigTab } from "./UIConfigTab";
 import { ValidationsTab } from "./ValidationsTab";
@@ -33,12 +38,16 @@ import { CreateDomainTab, type CreateDomainPayload } from "./CreateDomainTab";
 import { DataTab } from "./DataTab";
 import { TranslationsTab } from "./TranslationsTab";
 import { ExportJsonTab } from "./ExportJsonTab";
+import { applyDomainAccess } from "./accessLoader";
 import type { FieldDraft } from "./fieldDraftTypes";
 import type { QuickCreateField } from "./DomainPickers";
 import { draftToDomainFieldCore, draftToUIHint, draftToABACRule, draftToRBACRule } from "./draftConverters";
 import { ImportDomainModelModal } from "./ImportDomainModelModal";
 import type { DomainModelImportResult } from "./domainImport";
+import { resolveImportScope } from "./importScope";
 import { useProjectStore } from "../../store/projectStore";
+import type { DomainPermissionRule } from "./Domainpermissionspanel";
+import { apiGetDomainAbac, apiSaveDomainAbac, apiListRoleNames } from "../../api/abacapi";
 
 // ════════════════════════════════════════════════════════════════════════════
 // Main export — SchemaInspector
@@ -74,14 +83,26 @@ interface SchemaInspectorProps {
    *  {domain} domain") — so a parent tracking its own state for sidebar
    *  highlighting stays accurate even after an internal-only jump. */
   onTabChange?: (tab: MainTab) => void;
+  /** Domain model to scroll to and highlight on the Domain Model tab
+   *  (set when one is clicked in the sidebar tree). */
+  focusDomain?: string | null;
 }
 
-export const SchemaInspector = forwardRef<SchemaInspectorHandle, SchemaInspectorProps>(function SchemaInspector({ schemas, activeTab, onTabChange }, ref) {
+export const SchemaInspector = forwardRef<SchemaInspectorHandle, SchemaInspectorProps>(function SchemaInspector({ schemas, activeTab, onTabChange, focusDomain }, ref) {
   const [tab,   setTab]   = useState<MainTab>(activeTab ?? "domain");
   const [extra, setExtra] = useState<ExtraSchemaState>(EMPTY_EXTRA);
   const [backendLoadStatus, setBackendLoadStatus] = useState<string | null>(null);
   const [showImportModal, setShowImportModal] = useState(false);
   const currentProjectId = useProjectStore((s) => s.currentProjectId);
+  const currentModuleId  = useProjectStore((s) => s.currentModuleId);
+
+  // Role names shown in the "Who can access (roles)" dropdown of each
+  // domain's Permissions panel. TEMPORARY list — replace with the real
+  // roles from the RBAC Admin → Roles page (see the TODO effect below).
+  const [availableRoles, setAvailableRoles] = useState<string[]>([]);
+  // domainName -> saved access rules (loaded from the backend when a card's Permissions panel opens).
+  const [permissions, setPermissions] = useState<Record<string, DomainPermissionRule[]>>({});
+  const loadedPermDomains = useRef<Set<string>>(new Set());
 
   useImperativeHandle(ref, () => ({
     openImportModal: () => setShowImportModal(true),
@@ -102,6 +123,43 @@ export const SchemaInspector = forwardRef<SchemaInspectorHandle, SchemaInspector
     onTabChange?.(tab);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tab]);
+
+  // Real role names from the RBAC Roles page (GET /rbac/roles — admin only).
+  useEffect(() => {
+    apiListRoleNames()
+      .then(setAvailableRoles)
+      .catch((err) => console.warn("Could not load roles:", err?.message));
+  }, []);
+
+  // Load a domain's saved ABAC rules the first time its Permissions panel opens.
+  async function handleLoadPermissions(domainName: string) {
+    if (loadedPermDomains.current.has(domainName)) return;
+    try {
+      const rules = await apiGetDomainAbac(domainName);
+      loadedPermDomains.current.add(domainName);
+      setPermissions((prev) => ({ ...prev, [domainName]: rules }));
+    } catch (err: any) {
+      flash(`⚠️ Could not load permissions for "${domainName}": ${err?.message ?? String(err)}`, 6000);
+    }
+  }
+
+  function handleChangePermissions(domainName: string, rules: DomainPermissionRule[]) {
+    setPermissions((prev) => ({ ...prev, [domainName]: rules }));
+  }
+
+  async function handleSavePermissions(domainName: string, rules: DomainPermissionRule[]) {
+    try {
+      const saved = await apiSaveDomainAbac(domainName, rules, {
+        projectId: extra.projectIds[domainName] ?? currentProjectId,
+        moduleId:  extra.moduleIds[domainName]  ?? currentModuleId,
+      });
+      loadedPermDomains.current.add(domainName);
+      setPermissions((prev) => ({ ...prev, [domainName]: saved }));
+      flash(`✅ Permissions saved for "${domainName}" (${saved.length} rule${saved.length === 1 ? "" : "s"}).`);
+    } catch (err: any) {
+      flash(`❌ Could not save permissions for "${domainName}": ${err?.message ?? String(err)}`, 6000);
+    }
+  }
 
   const [pendingDomainName, setPendingDomainName] = useState<string | null>(null);
   const [pendingParentDomain, setPendingParentDomain] = useState<string | null>(null);
@@ -126,6 +184,47 @@ export const SchemaInspector = forwardRef<SchemaInspectorHandle, SchemaInspector
   const liveSchemas = useMemo(() => mergeAll(baseSchemas, extra), [baseSchemas, extra]);
   const liveDomainNames = useMemo(() => Object.keys(liveSchemas.domains), [liveSchemas]);
 
+  // Domain models living in OTHER modules of the current project. They are
+  // not part of liveSchemas (the module filter scopes the backend load), but
+  // they must be selectable as link targets, so fetch just their names.
+  const [projectDomainNames, setProjectDomainNames] = useState<string[]>([]);
+  useEffect(() => {
+    if (!currentProjectId || !currentModuleId) { setProjectDomainNames([]); return; }
+    let cancelled = false;
+    apiListSchemas(currentProjectId, null)
+      .then((res) => {
+        if (cancelled) return;
+        // Defensive: even though the request is project-scoped, never trust the
+        // response blindly — drop any entry the backend tags with a different project.
+        setProjectDomainNames(
+          res.status === "success"
+            ? (res.schemas ?? [])
+                .filter((e) => e.project_id == null || String(e.project_id) === String(currentProjectId))
+                .map((e) => e.table_name)
+            : [],
+        );
+      })
+      .catch(() => { if (!cancelled) setProjectDomainNames([]); });
+    return () => { cancelled = true; };
+  }, [currentProjectId, currentModuleId, extra.newDomains.length]);
+  // Names offered by the link pickers: this module's domains + the rest of the project's.
+  // Domains that belong to a DIFFERENT project (they can linger in liveSchemas
+  // from an earlier unscoped / other-project load) must not be offered as link
+  // targets, so keep only this project's (or not-yet-tagged, i.e. new) ones.
+  const linkableDomainNames = useMemo(() => {
+    const live = currentProjectId
+      ? liveDomainNames.filter((n) => {
+          // Strict: only domains positively tagged with THIS project. Untagged
+          // ones (e.g. loaded from another project without a project_id) used to
+          // slip through here and show up in the "Select Domain" dropdown.
+          // Genuinely this-project domains still arrive via projectDomainNames.
+          const pid = extra.projectIds[n];
+          return pid != null && String(pid) === String(currentProjectId);
+        })
+      : liveDomainNames;
+    return Array.from(new Set([...live, ...projectDomainNames]));
+  }, [liveDomainNames, projectDomainNames, currentProjectId, extra.projectIds]);
+
   // What the Domain Model page's project filter (top-right, App.tsx) should
   // actually show. Backend-sourced domains are already scoped server-side
   // (apiListSchemas' project_id query param) and pruned client-side in
@@ -137,13 +236,17 @@ export const SchemaInspector = forwardRef<SchemaInspectorHandle, SchemaInspector
   // (currentProjectId === null) shows everything, matching apiListSchemas()
   // returning the full unfiltered list in that case.
   const visibleSchemas = useMemo(() => {
-    if (!currentProjectId) return liveSchemas;
+    if (!currentProjectId && !currentModuleId) return liveSchemas;
     const domains: typeof liveSchemas.domains = {};
     for (const [name, def] of Object.entries(liveSchemas.domains)) {
-      if (extra.projectIds[name] === currentProjectId) domains[name] = def;
+      const inProject = !currentProjectId || extra.projectIds[name] === currentProjectId;
+      // Project → Module → Domain model: when a module is selected, only
+      // that module's domain models are visible.
+      const inModule  = !currentModuleId  || extra.moduleIds[name]  === currentModuleId;
+      if (inProject && inModule) domains[name] = def;
     }
     return { ...liveSchemas, domains };
-  }, [liveSchemas, extra.projectIds, currentProjectId]);
+  }, [liveSchemas, extra.projectIds, extra.moduleIds, currentProjectId, currentModuleId]);
 
 const didAutoLoad = useRef(false);
 
@@ -209,6 +312,9 @@ async function handleQuickCreateDomain(name: string, fields: QuickCreateField[])
       projectIds: currentProjectId
         ? { ...prev.projectIds, [name]: currentProjectId }
         : prev.projectIds,
+      moduleIds: currentModuleId
+        ? { ...prev.moduleIds, [name]: currentModuleId }
+        : prev.moduleIds,
     }));
 
     // Also create the actual table in the backend
@@ -232,6 +338,67 @@ async function handleQuickCreateDomain(name: string, fields: QuickCreateField[])
     } catch (err: any) {
       setBackendLoadStatus(`⚠️ Domain "${name}" added to schema but backend unreachable: ${err?.message}`);
     }
+    setTimeout(() => setBackendLoadStatus(null), 4000);
+  }
+
+  async function handleCreateMultiLinkDomain(name: string, linkedDomains: string[]) {
+    if (linkedDomains.length < 2) {
+      throw new Error("Select at least two domains to create a multi-link domain.");
+    }
+
+    const cachedFields = extra.newDomains.find((domain) => domain.name === name)?.fields ?? {};
+    const existingFields: Record<string, DomainFieldCore> = {};
+    for (const [fieldName, field] of Object.entries(cachedFields)) {
+      existingFields[fieldName] = { ...field };
+    }
+    for (const [fieldName, field] of Object.entries(liveSchemas.domains[name]?.fields ?? {})) {
+      existingFields[fieldName] = { ...existingFields[fieldName], ...field } as DomainFieldCore;
+      const validationRefs = liveSchemas._layers?.validationRefs?.[`${name}.${fieldName}`];
+      if (validationRefs?.length) existingFields[fieldName].validationRefs = validationRefs;
+    }
+
+    for (const linkedDomain of linkedDomains) {
+      const fieldName = `${linkedDomain}Id`;
+      existingFields[fieldName] = {
+        ...existingFields[fieldName],
+        type: "string",
+        relatedDomain: linkedDomain,
+        relationKind: "association",
+        multiLinkDomain: true,
+      };
+    }
+
+    const req = domainToBackendRequest({
+      registry: liveSchemas._layers?.validationRegistry ?? {},
+      domainName: name,
+      fields: existingFields,
+      uiHints: liveSchemas._layers?.ui ?? {},
+      rbacRules: liveSchemas._layers?.rbac?.fields ?? {},
+      abacRules: liveSchemas._layers?.abac?.rules ?? {},
+      db_backend: extra.dbBackends[name] === "dynamodb" ? "dynamodb" : "postgresql",
+      versioned: extra.versioned[name],
+    });
+    const res = await apiCreateDomain(req);
+    if (res.status !== "success") {
+      throw new Error(res.message || `Could not create multi-link domain "${name}".`);
+    }
+
+    setExtra((prev) => ({
+      ...prev,
+      newDomains: [
+        ...prev.newDomains.filter((domain) => domain.name !== name),
+        { name, fields: existingFields },
+      ],
+      dbBackends: { ...prev.dbBackends, [name]: res.db_backend ?? extra.dbBackends[name] ?? "postgresql" },
+      projectIds: prev.projectIds[name] || !currentProjectId
+        ? prev.projectIds
+        : { ...prev.projectIds, [name]: currentProjectId },
+      moduleIds: prev.moduleIds[name] || !currentModuleId
+        ? prev.moduleIds
+        : { ...prev.moduleIds, [name]: currentModuleId },
+    }));
+
+    setBackendLoadStatus(`✅ Multi-link domain "${name}" created or updated.`);
     setTimeout(() => setBackendLoadStatus(null), 4000);
   }
 
@@ -311,6 +478,9 @@ async function handleQuickCreateDomain(name: string, fields: QuickCreateField[])
       projectIds: currentProjectId
         ? { ...prev.projectIds, [name]: currentProjectId }
         : prev.projectIds,
+      moduleIds: currentModuleId
+        ? { ...prev.moduleIds, [name]: currentModuleId }
+        : prev.moduleIds,
     }));
 
     // Persist relation markers (display-only, e.g. a "domain model" typed
@@ -376,6 +546,12 @@ async function handleQuickCreateDomain(name: string, fields: QuickCreateField[])
   // domain's non-relation fields (relation fields never become columns —
   // they're display-only markers, same as everywhere else in this file).
   async function handleImportDomainModelJson(result: DomainModelImportResult) {
+    // Project → Module structure in the JSON: find or create each project /
+    // module first, so every domain can be filed under real ids.
+    const scope = await resolveImportScope(result);
+    const projectOf = (d: string) => scope.byDomain[d]?.projectId ?? extra.projectIds[d] ?? currentProjectId;
+    const moduleOf  = (d: string) => (scope.byDomain[d] ? scope.byDomain[d].moduleId : (extra.moduleIds[d] ?? currentModuleId));
+
     setExtra((prev) => {
       const nextExtraFields = { ...prev.extraFields };
       const nextDbBackends = { ...prev.dbBackends };
@@ -383,7 +559,28 @@ async function handleQuickCreateDomain(name: string, fields: QuickCreateField[])
         nextExtraFields[domain.name] = { ...(nextExtraFields[domain.name] ?? {}), ...domain.fields };
         if (!nextDbBackends[domain.name]) nextDbBackends[domain.name] = "postgresql";
       }
-      return { ...prev, extraFields: nextExtraFields, dbBackends: nextDbBackends };
+      // Tag imported domains with their project/module (from the JSON's
+      // structure, else the currently selected one) — otherwise the
+      // project/module filter (visibleSchemas) hides them.
+      const nextProjectIds = { ...prev.projectIds };
+      const nextModuleIds  = { ...prev.moduleIds };
+      for (const { name } of result.domains) {
+        const scoped = scope.byDomain[name];
+        const pid = scoped ? scoped.projectId : currentProjectId;
+        const mid = scoped ? scoped.moduleId  : currentModuleId;
+        if (pid) nextProjectIds[name] = pid;
+        if (mid) nextModuleIds[name] = mid; else if (scoped) delete nextModuleIds[name];
+      }
+      return {
+        ...prev,
+        extraFields: nextExtraFields,
+        dbBackends: nextDbBackends,
+        // Inline `access.rbac` / `access.abac` from the imported JSON.
+        rbacRules:  { ...prev.rbacRules, ...result.rbacRules },
+        abacRules:  { ...prev.abacRules, ...result.abacRules },
+        projectIds: nextProjectIds,
+        moduleIds:  nextModuleIds,
+      };
     });
 
     for (const [domName, markers] of Object.entries(result.relationMarkers)) {
@@ -398,9 +595,13 @@ async function handleQuickCreateDomain(name: string, fields: QuickCreateField[])
     let created = 0;
     let failed = 0;
     for (const domain of result.domains) {
-      // Relation-marker fields never become real backend columns.
+      // Display-only relation markers (parent-side integral links and
+      // associations) never become columns, but a child's real FK does —
+      // send it as a plain string column, like everywhere else in this file.
       const backendFields = Object.fromEntries(
-        Object.entries(domain.fields).filter(([, f]) => f.type !== "relation")
+        Object.entries(domain.fields)
+          .filter(([, f]) => f.type !== "relation" || (f.relationKind === "integral" && f.cardinality !== "list" && !!f.relatedDomain))
+          .map(([k, f]) => [k, f.type === "relation" ? { ...f, type: "string" as FieldType } : f])
       );
       if (Object.keys(backendFields).length === 0) continue;
       try {
@@ -409,20 +610,48 @@ async function handleQuickCreateDomain(name: string, fields: QuickCreateField[])
           domainName: domain.name,
           fields:     backendFields as any,
           uiHints:    {},
-          rbacRules:  {},
-          abacRules:  {},
+          rbacRules:  result.rbacRules,
+          abacRules:  result.abacRules,
           db_backend: "postgresql",
         });
+        // Domains nested under a project / module in the JSON are created
+        // there explicitly (null module = "in the project, no module");
+        // the rest fall back to the currently selected scope as before.
+        if (scope.byDomain[domain.name]) {
+          req.project_id = scope.byDomain[domain.name].projectId;
+          req.module_id  = scope.byDomain[domain.name].moduleId;
+        }
         const res = await apiCreateDomain(req);
         if (res.status === "success") created++; else failed++;
       } catch {
         failed++;
       }
     }
+    // Association links → junction tables.
+    for (const { a, b } of result.associations) {
+      await ensureJunctionDomain(a, b, "postgresql");
+    }
+    // Domain-level access (`access.rbac` role → actions, `access.abac` rules).
+    let accessNote = "";
+    if (Object.keys(result.domainAccess).length > 0) {
+      const acc = await applyDomainAccess(result.domainAccess, (d) => ({
+        projectId: projectOf(d),
+        moduleId:  moduleOf(d),
+      }));
+      accessNote = ` — access: ${acc.rbacRoles} role grant set(s), ${acc.abacDomains} ABAC domain(s)` +
+        (acc.warnings.length ? ` (${acc.warnings.length} warning(s): ${acc.warnings[0]})` : "");
+    }
+    const scopeNote = result.projects.length
+      ? ` in ${result.totalProjects} project(s) / ${result.totalModules} module(s)` +
+        (scope.createdProjects || scope.createdModules ? ` (created ${scope.createdProjects} project(s), ${scope.createdModules} module(s))` : "") +
+        (scope.warnings.length ? ` — ⚠️ ${scope.warnings[0]}` : "")
+      : "";
+    useProjectStore.getState().bumpTree();
     setBackendLoadStatus(
-      `✅ Imported ${result.totalDomains} domain model(s), ${result.totalAttributes} attribute(s)` +
+      `✅ Imported ${result.totalDomains} domain model(s)${scopeNote}, ${result.totalAttributes} attribute(s)` +
       (result.skippedSynthesized ? ` (${result.skippedSynthesized} synthesized attribute(s) skipped)` : "") +
-      (failed ? ` — ${created} table(s) saved to backend, ${failed} failed (still available locally).` : ` — saved to backend.`)
+      (failed ? ` — ${created} table(s) saved to backend, ${failed} failed (still available locally).` : ` — saved to backend.`) +
+      accessNote
     );
     setTimeout(() => setBackendLoadStatus(null), 6000);
   }
@@ -451,16 +680,72 @@ const handleRedirectToCreate = (domainName: string, parentDomain?: string, field
   }
   setTab("create");
 };
-  // ── Core junction creation helper ─────────────────────────────────────────
+  // ── Owns / Uses label on an EXISTING junction table ───────────────────────
+// Metadata only: re-saves the junction with `linkMode` on its owning FK
+// column (e.g. Employeees_Customerss.EmployeeesId) so the page builder can
+// read it. Columns and table structure are untouched. No-op when the label
+// is unchanged or the junction isn't loaded.
+async function syncJunctionLinkMode(
+  junctionName: string,
+  ownerIdField: string,
+  linkMode: "owns" | "uses" | undefined,
+  dbBackend: string,
+) {
+  if (!linkMode) return;
+  const fields = liveSchemas.domains[junctionName]?.fields as Record<string, DomainFieldCore> | undefined;
+  if (!fields || !fields[ownerIdField] || (fields[ownerIdField] as any).linkMode === linkMode) return;
+  const updated: Record<string, DomainFieldCore> = {
+    ...fields,
+    [ownerIdField]: { ...fields[ownerIdField], linkMode },
+  };
+  setExtra((prev) => ({
+    ...prev,
+    newDomains: [
+      ...prev.newDomains.filter((d) => d.name !== junctionName),
+      { name: junctionName, fields: updated },
+    ],
+  }));
+  try {
+    const req = domainToBackendRequest({
+      registry: liveSchemas._layers?.validationRegistry ?? {},
+      domainName: junctionName,
+      fields: updated as any,
+      uiHints: {}, rbacRules: {}, abacRules: {},
+      db_backend: dbBackend as any,
+    });
+    await apiCreateDomain(req);
+  } catch (err: any) {
+    console.warn(`Could not save Owns/Uses label on "${junctionName}":`, err?.message);
+  }
+}
+
+// ── Core junction creation helper ─────────────────────────────────────────
 async function ensureJunctionDomain(
   parentDomainName: string,
   relatedDomainName: string,
   dbBackend: string,
-) {
+  cardinality?: string,
+  linkMode?: "owns" | "uses",
+): Promise<JunctionResult> {
   const pairKey = [parentDomainName, relatedDomainName].sort().join("__");
-  if (extra.junctionPairs.has(pairKey)) return; // ✅ deduplicate
+  const junctionName = `${parentDomainName}_${relatedDomainName}`;
+  if (extra.junctionPairs.has(pairKey)) {
+    await syncJunctionLinkMode(junctionName, `${parentDomainName}Id`, linkMode, dbBackend);
+    return { name: junctionName, status: "skipped" }; // ✅ deduplicate
+  }
 
-  const jd = buildJunctionDomain(parentDomainName, relatedDomainName);
+  // The same pair may already exist under the reverse name (B_A when we'd
+  // create A_B) — e.g. after a reload, when junctionPairs is empty again.
+  // Only treat it as that junction if it is exactly the two FK columns.
+  const reverseName   = `${relatedDomainName}_${parentDomainName}`;
+  const reverseFields = Object.keys(liveSchemas.domains[reverseName]?.fields ?? {}).sort().join(",");
+  const expectedPair  = [`${parentDomainName}Id`, `${relatedDomainName}Id`].sort().join(",");
+  if (reverseFields && reverseFields === expectedPair) {
+    await syncJunctionLinkMode(reverseName, `${parentDomainName}Id`, linkMode, dbBackend);
+    return { name: reverseName, status: "exists", message: `"${reverseName}" already links these two domains` };
+  }
+
+  const jd = buildJunctionDomain(parentDomainName, relatedDomainName, cardinality, linkMode);
 
   // Always build rd with parent fields
   // If cbranch was quick-created with empty fields, use parent fields
@@ -493,6 +778,9 @@ setExtra((prev) => {
       projectIds: currentProjectId
         ? { ...prev.projectIds, ...Object.fromEntries(toAdd.map((d) => [d.name, currentProjectId])) }
         : prev.projectIds,
+      moduleIds: currentModuleId
+        ? { ...prev.moduleIds, ...Object.fromEntries(toAdd.map((d) => [d.name, currentModuleId])) }
+        : prev.moduleIds,
       junctionPairs: nextPairs,
     };
   });
@@ -500,6 +788,7 @@ setExtra((prev) => {
   // Always push both rd and jd to backend
   // apiCreateDomain returns table_created: false if already exists — safe to call always
 const domainsToPush = [jd];
+  let result: JunctionResult = { name: jd.name, status: "failed" };
   for (const domain of domainsToPush) {
     const isJunction = true;
     try {
@@ -517,19 +806,90 @@ const domainsToPush = [jd];
         const action = res.table_created ? "created" : "already existed";
         const label  = isJunction ? "Junction table" : "Related domain";
         setBackendLoadStatus(`✅ ${label} "${domain.name}" ${action}.`);
+        result = { name: domain.name, status: res.table_created ? "created" : "exists" };
       } else {
         setBackendLoadStatus(`⚠️ "${domain.name}" added to schema, but backend: ${res.message}`);
+        result = { name: domain.name, status: "failed", message: res.message };
       }
     } catch (err: any) {
       setBackendLoadStatus(`⚠️ "${domain.name}" backend unreachable: ${err?.message}`);
+      result = { name: domain.name, status: "failed", message: err?.message };
     }
   }
   setTimeout(() => setBackendLoadStatus(null), 5000);
+  return result;
+}
+
+/**
+ * One association field can link several domains (draft.relatedDomains).
+ * Creates a `${domainName}_${related}` junction table for EACH of them, in
+ * order, and — when there is more than one — replaces the per-table toasts
+ * with a single combined summary (which names any that failed).
+ */
+async function ensureJunctionsFor(
+  domainName: string,
+  draft: FieldDraft,
+  dbBackend: string,
+): Promise<JunctionResult[]> {
+  const targets = Array.from(new Set(
+    (draft.relatedDomains?.length ? draft.relatedDomains : [draft.relatedDomain]).filter(Boolean),
+  ));
+  const results: JunctionResult[] = [];
+  for (const related of targets) {
+    results.push(await ensureJunctionDomain(domainName, related, dbBackend, draft.cardinality || undefined, draft.linkMode));
+  }
+  if (targets.length > 1) {
+    const failed  = results.filter((r) => r.status === "failed");
+    const created = results.filter((r) => r.status === "created").map((r) => r.name);
+    setBackendLoadStatus(
+      failed.length
+        ? `⚠️ Linked ${targets.length} domains to "${domainName}" — ${results.length - failed.length} junction table(s) ready, ` +
+          `${failed.length} failed: ${failed.map((f) => `${f.name}${f.message ? ` (${f.message})` : ""}`).join(", ")}`
+        : `✅ Linked ${targets.length} domains to "${domainName}" — ` +
+          (created.length ? `created ${created.length} junction table(s): ${created.join(", ")}` : "junction tables already existed") +
+          (created.length && created.length < results.length ? ` (${results.length - created.length} already existed)` : ""),
+    );
+    setTimeout(() => setBackendLoadStatus(null), 7000);
+  }
+  return results;
 }
 
   // ── Handlers ──────────────────────────────────────────────────────────────
 
-  async function handleAddFieldToExisting(domainName: string, fieldName: string, draft: FieldDraft) {
+  /** Adds the real `fieldName` text column (domain-choice column) to `domainName`'s table. */
+  async function addDomainChoiceColumn(
+    domainName: string, fieldName: string, draft: FieldDraft,
+    uiHint: ReturnType<typeof draftToUIHint>, fullPath: string,
+  ) {
+    try {
+      const existingFields = liveSchemas.domains[domainName]?.fields ?? {};
+      const req = domainToBackendRequest({
+        registry: liveSchemas._layers?.validationRegistry ?? {},
+        domainName,
+        fields: {
+          ...existingFields,
+          [fieldName]: {
+            type: "string" as FieldType,
+            relationKind: "association",
+            relatedDomain: draft.relatedDomain,
+            relatedDomains: draft.relatedDomains,
+          },
+        } as any,
+        uiHints: { ...(liveSchemas.uiHints as any), [fullPath]: { ...uiHint, label: primaryLabel(draft.labels, fieldName) } },
+        rbacRules: extra.rbacRules as any, abacRules: extra.abacRules as any,
+      });
+      const res = await apiCreateDomain(req);
+      setBackendLoadStatus(
+        res.status === "success"
+          ? `✅ Column "${fieldName}" added to "${domainName}" — stores the chosen one of ${draft.relatedDomains!.join(", ")}.`
+          : `⚠️ "${fieldName}" added locally, but backend: ${res.message}`,
+      );
+    } catch (err: any) {
+      setBackendLoadStatus(`⚠️ Could not add column "${fieldName}" to "${domainName}": ${err?.message}`);
+    }
+  }
+
+  async function handleAddFieldToExisting(domainName: string, fieldName: string, draft: FieldDraft): Promise<JunctionResult | undefined> {
     console.log("handleAddFieldToExisting called — type:", draft.type, "isPartOf:", draft.isPartOf, "relatedDomain:", draft.relatedDomain);
     const fullPath = `${domainName}.${fieldName}`;
     const uiHint   = draftToUIHint(draft);
@@ -616,6 +976,20 @@ if (draft.isPartOf === "fk") {
           setBackendLoadStatus(`⚠️ Could not add "${fkFieldName}" to "${domainName}": ${err?.message}`);
         }
         setTimeout(() => setBackendLoadStatus(null), 5000);
+     } else if (!draft.isPartOf) {
+        // 🔀 Association — create the junction table (no column on either side).
+        saveRelationMarker(domainName, fieldName, newField);
+        const junctions = await ensureJunctionsFor(domainName, draft, dbBackend);
+        // Several domains linked by ONE field → the parent table also gets a
+        // real text column (named after the field) that stores WHICH domain
+        // the user picked; the picked record itself is linked through that
+        // domain's junction table. The form uses relatedDomains to offer the
+        // domain picker.
+        if ((draft.relatedDomains?.length ?? 0) > 1) {
+          await addDomainChoiceColumn(domainName, fieldName, draft, uiHint, fullPath);
+        }
+        setTimeout(() => setBackendLoadStatus(null), 5000);
+        return junctions[0];
      } else if (draft.isPartOf) {
         // ✅ CHECKED — add parentId FK into child (relatedDomain) table
         const parentIdField = `${domainName}Id`;
@@ -634,7 +1008,7 @@ if (draft.isPartOf === "fk") {
               ...prev.extraFields,
               [draft.relatedDomain]: {
                 ...(prev.extraFields[draft.relatedDomain] ?? {}),
-                [parentIdField]: { type: "string", relationKind: "integral" },
+                [parentIdField]: { type: "string", relationKind: "integral", linkMode: draft.linkMode, cardinality: (draft.cardinality as any) || undefined },
               },
             },
           }));
@@ -646,7 +1020,7 @@ if (draft.isPartOf === "fk") {
               // (e.g. branch.clinicId → clinic) — the child only ever
               // exists under its parent, so the view-builder hides
               // Add Existing / Remove for it and only allows Create.
-              [parentIdField]: { type: "string" as FieldType, relationKind: "integral" },
+              [parentIdField]: { type: "string" as FieldType, relationKind: "integral", linkMode: draft.linkMode, cardinality: (draft.cardinality as any) || undefined },
             };
             const req = domainToBackendRequest({
               registry: liveSchemas._layers?.validationRegistry ?? {},
@@ -794,8 +1168,20 @@ if (draft.isPartOf === "fk") {
         }
         setTimeout(() => setBackendLoadStatus(null), 5000);
       } else if (!draft.isPartOf) {
-        // ❌ UNCHECKED — create junction table
-        await ensureJunctionDomain(domainName, draft.relatedDomain, dbBackend);
+        // ❌ UNCHECKED — create junction table(s)
+        await ensureJunctionsFor(domainName, draft, dbBackend);
+        // Keep the field under the name the user typed (display-only marker,
+        // never a column) — it was dropped from state above, so put it back
+        // and persist it, replacing the old name on a rename.
+        if (isRename) removeRelationMarker(domainName, oldName);
+        saveRelationMarker(domainName, newName, updatedField);
+        setExtra((prev) => ({
+          ...prev,
+          extraFields: {
+            ...prev.extraFields,
+            [domainName]: { ...(prev.extraFields[domainName] ?? {}), [newName]: updatedField },
+          },
+        }));
       } else {
         // ✅ CHECKED — add domainNameId into child (relatedDomain) table only
         const parentIdField = `${domainName}Id`;
@@ -805,7 +1191,7 @@ if (draft.isPartOf === "fk") {
             ...prev.extraFields,
             [draft.relatedDomain]: {
               ...(prev.extraFields[draft.relatedDomain] ?? {}),
-              [parentIdField]: { type: "string", relationKind: "integral" },
+              [parentIdField]: { type: "string", relationKind: "integral", linkMode: draft.linkMode, cardinality: (draft.cardinality as any) || undefined },
             },
           },
         }));
@@ -817,7 +1203,7 @@ if (draft.isPartOf === "fk") {
             // (e.g. branch.clinicId → clinic) — the child only ever
             // exists under its parent, so the view-builder hides
             // Add Existing / Remove for it and only allows Create.
-            [parentIdField]: { type: "string" as FieldType, relationKind: "integral" },
+            [parentIdField]: { type: "string" as FieldType, relationKind: "integral", linkMode: draft.linkMode, cardinality: (draft.cardinality as any) || undefined },
           };
           const req = domainToBackendRequest({
             registry: liveSchemas._layers?.validationRegistry ?? {},
@@ -878,6 +1264,20 @@ if (draft.isPartOf === "fk") {
       const updatedUIHints = { ...(liveSchemas.uiHints ?? {}) };
       if (isRename && updatedUIHints[oldPath]) { updatedUIHints[newPath] = updatedUIHints[oldPath]; delete updatedUIHints[oldPath]; }
       if (Object.values(uiHint).some((v) => v !== undefined)) updatedUIHints[newPath] = uiHint;
+
+      // The full save below only ADDS columns, so a rename or type change
+      // has to be applied to the existing column first — otherwise the old
+      // column (and its data) is left behind next to a new empty one.
+      if (lastBackendDomainNames.current.has(domainName)) {
+        const oldType = (liveSchemas.domains[domainName]?.fields as any)?.[oldName]?.type;
+        const typeChanged = !!oldType && oldType !== updatedField.type;
+        if (isRename || typeChanged) {
+          await apiUpdateField(domainName, oldName, {
+            new_field_id: isRename ? newName : undefined,
+            type:         typeChanged ? frontendTypeToBackend(updatedField.type as string) : undefined,
+          });
+        }
+      }
 
       const req = domainToBackendRequest({
         registry: liveSchemas._layers?.validationRegistry ?? {},
@@ -1017,6 +1417,12 @@ function handleDomainCreated(payload: CreateDomainPayload) {
               ...Object.fromEntries(allNew.map((d: DomainDefinition) => [d.name, currentProjectId])),
             }
           : prev.projectIds,
+        moduleIds: currentModuleId
+          ? {
+              ...prev.moduleIds,
+              ...Object.fromEntries(allNew.map((d: DomainDefinition) => [d.name, currentModuleId])),
+            }
+          : prev.moduleIds,
         versioned: { ...prev.versioned, [payload.domain.name]: payload.versioned },
         junctionPairs: nextPairs,
       };
@@ -1124,6 +1530,133 @@ function handleViewConfig(domainName: string, cfg: DomainViewConfig) {
     setTimeout(() => setBackendLoadStatus(null), 3000);
   }
 
+  // ── Edit / delete domain models and their attributes ───────────────────
+
+  /** Drop every trace of a domain (or a renamed-away name) from local state. */
+  function purgeDomainLocally(name: string) {
+    const prefix = `${name}.`;
+    const dropKeys = <T,>(rec: Record<string, T>) =>
+      Object.fromEntries(Object.entries(rec).filter(([k]) => k !== name && !k.startsWith(prefix)));
+    setExtra((prev) => ({
+      ...prev,
+      newDomains:  prev.newDomains.filter((d) => d.name !== name),
+      extraFields: dropKeys(prev.extraFields),
+      uiHints:     dropKeys(prev.uiHints),
+      rbacRules:   dropKeys(prev.rbacRules),
+      abacRules:   dropKeys(prev.abacRules),
+      viewConfigs: dropKeys(prev.viewConfigs),
+      dbBackends:  dropKeys(prev.dbBackends),
+      versioned:   dropKeys(prev.versioned),
+      projectIds:  dropKeys(prev.projectIds),
+      moduleIds:   dropKeys(prev.moduleIds),
+    }));
+    lastBackendDomainNames.current.delete(name);
+  }
+
+  function flash(msg: string, ms = 4000) {
+    setBackendLoadStatus(msg);
+    setTimeout(() => setBackendLoadStatus(null), ms);
+  }
+
+  async function handleDeleteDomain(domainName: string) {
+    try {
+      if (lastBackendDomainNames.current.has(domainName)) {
+        await apiDeleteDomain(domainName);
+      }
+      purgeDomainLocally(domainName);
+      flash(`✅ Domain model "${domainName}" deleted.`);
+    } catch (err: any) {
+      flash(`❌ Could not delete "${domainName}": ${err?.message ?? String(err)}`, 6000);
+    }
+  }
+
+  async function handleRenameDomain(oldName: string, newName: string) {
+    const next = newName.trim();
+    if (!next || next === oldName) return;
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(next)) {
+      flash("⚠️ Domain names can only use letters, digits and underscores, and can't start with a digit.", 6000);
+      return;
+    }
+    if (liveSchemas.domains[next]) {
+      flash(`⚠️ A domain model named "${next}" already exists.`, 5000);
+      return;
+    }
+    try {
+      if (lastBackendDomainNames.current.has(oldName)) {
+        await apiUpdateDomain(oldName, { new_table_name: next });
+        purgeDomainLocally(oldName);
+        await handleLoadFromBackend();
+      } else {
+        // Not saved yet — rename in local state only.
+        const oldPrefix = `${oldName}.`;
+        const rekey = <T,>(rec: Record<string, T>) =>
+          Object.fromEntries(Object.entries(rec).map(([k, v]) => [
+            k === oldName ? next : k.startsWith(oldPrefix) ? `${next}.${k.slice(oldPrefix.length)}` : k, v,
+          ]));
+        setExtra((prev) => ({
+          ...prev,
+          newDomains:  prev.newDomains.map((d) => (d.name === oldName ? { ...d, name: next } : d)),
+          extraFields: rekey(prev.extraFields),
+          uiHints:     rekey(prev.uiHints),
+          rbacRules:   rekey(prev.rbacRules),
+          abacRules:   rekey(prev.abacRules),
+          viewConfigs: rekey(prev.viewConfigs),
+          dbBackends:  rekey(prev.dbBackends),
+          versioned:   rekey(prev.versioned),
+          projectIds:  rekey(prev.projectIds),
+          moduleIds:   rekey(prev.moduleIds),
+        }));
+      }
+      flash(`✅ Renamed "${oldName}" → "${next}".`);
+    } catch (err: any) {
+      flash(`❌ Could not rename "${oldName}": ${err?.message ?? String(err)}`, 6000);
+    }
+  }
+
+  async function handleDeleteField(domainName: string, fieldName: string) {
+    try {
+      if (lastBackendDomainNames.current.has(domainName)) {
+        try {
+          await apiDeleteField(domainName, fieldName);
+        } catch (err: any) {
+          // Display-only relation markers (e.g. an association field like
+          // "service") have no column in the backend, so it answers 404
+          // "Field ... not found". Nothing to drop there — just clean up locally.
+          const msg = String(err?.message ?? "");
+          const isMissingOnBackend = msg.includes("API 404") || /not found in/i.test(msg);
+          if (!isMissingOnBackend) throw err;
+        }
+      }
+      // Stop the saved marker from being re-hydrated on the next reload.
+      removeRelationMarker(domainName, fieldName);
+      const path = `${domainName}.${fieldName}`;
+      setExtra((prev) => {
+        const without = <T,>(rec: Record<string, T>) => {
+          const c = { ...rec }; delete c[path]; return c;
+        };
+        const extraFields = { ...prev.extraFields };
+        if (extraFields[domainName]) {
+          const f = { ...extraFields[domainName] }; delete f[fieldName]; extraFields[domainName] = f;
+        }
+        return {
+          ...prev,
+          newDomains: prev.newDomains.map((d) => {
+            if (d.name !== domainName) return d;
+            const fields = { ...d.fields }; delete fields[fieldName];
+            return { ...d, fields };
+          }),
+          extraFields,
+          uiHints:   without(prev.uiHints),
+          rbacRules: without(prev.rbacRules),
+          abacRules: without(prev.abacRules),
+        };
+      });
+      flash(`✅ Field "${fieldName}" deleted from "${domainName}".`);
+    } catch (err: any) {
+      flash(`❌ Could not delete "${fieldName}": ${err?.message ?? String(err)}`, 6000);
+    }
+  }
+
   async function handleSaveDomainToBackend(domainName: string) {
     const domainDef = liveSchemas.domains[domainName];
     if (!domainDef) return;
@@ -1209,6 +1742,9 @@ function handleViewConfig(domainName: string, cfg: DomainViewConfig) {
                 // just one more copy of the same whitelist, in a
                 // different function.
                 relatedDomain: (v as any).relatedDomain,
+                relatedDomains: (v as any).relatedDomains,
+                multiLinkDomain: v.multiLinkDomain,
+                linkMode: (v as any).linkMode,
                 cardinality: (v as any).cardinality,
                 // Same gap, one more field: validationRefs (the tag
                 // names, e.g. ["required-name"]) was never carried
@@ -1227,6 +1763,7 @@ function handleViewConfig(domainName: string, cfg: DomainViewConfig) {
           };
           const dbBackend = (entry as any).db_backend ?? "postgresql";
           const entryProjectId = (entry as any).project_id ?? null;
+          const entryModuleId  = (entry as any).module_id ?? null;
           next = {
             ...next,
             newDomains: [...next.newDomains.filter((d) => d.name !== converted.domainName), domainDef],
@@ -1237,6 +1774,9 @@ function handleViewConfig(domainName: string, cfg: DomainViewConfig) {
             projectIds: entryProjectId
               ? { ...next.projectIds, [converted.domainName]: entryProjectId }
               : next.projectIds,
+            moduleIds: entryModuleId
+              ? { ...next.moduleIds, [converted.domainName]: entryModuleId }
+              : next.moduleIds,
           };
         }
         return next;
@@ -1277,8 +1817,8 @@ function handleViewConfig(domainName: string, cfg: DomainViewConfig) {
     handleLoadValidationRulesFromBackend();
   }, []);
 
-  // Re-load the domain-model list whenever the selected project changes
-  // (ProjectSelector.tsx) — skips the very first render, since the mount
+  // Re-load the domain-model list whenever the selected project or module
+  // changes (ProjectFilter / ModuleFilter in App.tsx) — skips the very first render, since the mount
   // effect above already loads with whatever project was selected on load.
   const skipInitialProjectReload = useRef(true);
   useEffect(() => {
@@ -1288,7 +1828,7 @@ function handleViewConfig(domainName: string, cfg: DomainViewConfig) {
     }
     handleLoadFromBackend();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [currentProjectId]);
+  }, [currentProjectId, currentModuleId]);
 
   return (
     <div className="si-root">
@@ -1312,6 +1852,14 @@ function handleViewConfig(domainName: string, cfg: DomainViewConfig) {
           dbBackends={extra.dbBackends}
           versioned={extra.versioned}
           projectIds={extra.projectIds}
+          moduleIds={extra.moduleIds}
+          focusDomain={focusDomain}
+          linkableDomainNames={linkableDomainNames}
+          multiLinkDomains={new Set(
+            Object.entries(visibleSchemas.domains)
+              .filter(([, domain]) => Object.values(domain.fields).some((field) => field.multiLinkDomain))
+              .map(([name]) => name)
+          )}
          junctionDomains={new Set(
   Array.from(extra.junctionPairs).flatMap((pairKey) => {
     const parts = pairKey.split("__");
@@ -1322,13 +1870,22 @@ function handleViewConfig(domainName: string, cfg: DomainViewConfig) {
 )}
           onAddField={handleAddFieldToExisting}
           onEditField={handleEditField}
+          onDeleteField={handleDeleteField}
+          onDeleteDomain={handleDeleteDomain}
+          onRenameDomain={handleRenameDomain}
           onViewConfig={handleViewConfig}
           onSaveBackend={handleSaveDomainToBackend}
           onQuickCreateDomain={handleQuickCreateDomain}
           onRichCreateDomain={handleRichCreateDomain}
           onRedirectToCreate={handleRedirectToCreate}
           onGoToCreateDomain={() => setTab("create")}
+          onCreateMultiLinkDomain={handleCreateMultiLinkDomain}
           onAddValidationRule={handleAddValidationRule}
+          availableRoles={availableRoles}
+          permissions={permissions}
+          onChangePermissions={handleChangePermissions}
+          onSavePermissions={handleSavePermissions}
+          onLoadPermissions={handleLoadPermissions}
         />
       )}
       {tab === "ui" && (
@@ -1358,7 +1915,7 @@ function handleViewConfig(domainName: string, cfg: DomainViewConfig) {
         <CreateDomainTab
           onAdd={handleDomainCreated}
           registry={liveSchemas._layers?.validationRegistry ?? {}}
-          domainNames={liveDomainNames}
+          domainNames={linkableDomainNames}
           onQuickCreateDomain={handleQuickCreateDomain}
           onRichCreateDomain={handleRichCreateDomain}
           schemas={liveSchemas}
@@ -1370,8 +1927,8 @@ function handleViewConfig(domainName: string, cfg: DomainViewConfig) {
         />
       </div>
       {tab === "data" && <DataTab schemas={liveSchemas} dbBackends={extra.dbBackends} />}
-      {tab === "translations" && <TranslationsTab schemas={liveSchemas} onSave={handleSaveTranslation} />}
-      {tab === "export" && <ExportJsonTab schemas={liveSchemas} />}
+      {tab === "translations" && <TranslationsTab schemas={visibleSchemas} onSave={handleSaveTranslation} />}
+      {tab === "export" && <ExportJsonTab schemas={liveSchemas} projectIds={extra.projectIds} moduleIds={extra.moduleIds} />}
 
   
     </div>
