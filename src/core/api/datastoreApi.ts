@@ -6,7 +6,11 @@
  */
 
 import { useAuthStore } from "../../store/authStore";
+import { EMAIL_RULE, hasEmailRule } from "../schema/types";
 import { useProjectStore } from "../store/projectStore";
+import { PermissionError, extractDetail } from "./permissionError";
+import { apiListResources, apiCreateResource, apiCreatePermission } from "./rbacApi";
+import { apiFetchMe } from "./authApi";
 
 const API_BASE = import.meta.env.VITE_API_URL || "https://ab2dgab6euwc4d2f3dkgddmxiu0mmuxx.lambda-url.ap-south-1.on.aws";
 
@@ -22,7 +26,7 @@ function resolveToken(): string | null {
 // Backend wire types (match the FastAPI SchemaField Pydantic model)
 // ════════════════════════════════════════════════════════════════════════════
 
-export type BackendFieldType = "text" | "number" | "boolean" | "date" | "formattedText";
+export type BackendFieldType = "text" | "number" | "boolean" | "date" | "formattedText" | "domain_model";
 
 export interface BackendSchemaField {
   field_id:      string;
@@ -32,15 +36,30 @@ export interface BackendSchemaField {
   cardinality?:  string;           // "list" = multi-value field
   relationKind?: string;           // "integral" | "association"
   relatedDomain?: string;          // the domain this field's relation points to
+  relatedDomains?: string[];       // several domains linked by ONE association field — the form shows a domain picker
+  multiLinkDomain?: boolean;      // FK field belongs to an associative multi-link domain
+  linkMode?: "owns" | "uses";     // Owns / Uses label (metadata only) — read by the page builder
   validationRefs?: string[];       // attached named validation-rule tags
   // Extended metadata stored via model_config extra: allow
   component?:    string;
+  format?:       string;           // "email" marks an email field (stored as text)
   placeholder?:  string;
   datasource?:   string;
   ui_config?:    Record<string, any>;
   rbac?:         Record<string, any>;
   abac?:         Record<string, any>;
   [key: string]: any;              // any extra fields
+}
+
+/**
+ * Name to SHOW for a domain model. The backend key can carry a "__<projectId>"
+ * suffix (e.g. "Client__10") when another project already has a model called
+ * "Client"; users should only ever see "Client". Prefer the backend's
+ * `domain_name`, and strip the suffix as a fallback. Never use this for API calls.
+ */
+export function displayDomainName(key: string, domainName?: string | null): string {
+  const base = (domainName && domainName.trim()) ? domainName : key;
+  return base.replace(/__(?:\d+|np)(?:_\d+)?$/, "");
 }
 
 export interface BackendCreateRequest {
@@ -53,11 +72,25 @@ export interface BackendCreateRequest {
    *  project (see ProjectSelector.tsx / projectStore.ts). Pass an
    *  explicit `null` to force "no project" even if one is selected. */
   project_id?: string | number | null;
+  /** Optional — places this domain model in a module of that project
+   *  (Project → Module → Domain model). Same defaulting rule as
+   *  project_id: omitted → the currently-selected module (only when the
+   *  project is also taken from the current selection); explicit `null`
+   *  → "no module". */
+  module_id?: string | number | null;
+  /** Send true when the user is CREATING a new domain model (not saving edits to
+   *  an existing one). The backend then rejects a name that already exists in the
+   *  same project (409). The same name in a DIFFERENT project is allowed. */
+  is_new?: boolean;
 }
 
 export interface BackendCreateResponse {
   status:        string;
+  /** Internal key — use this for every later API call. Equals the name unless
+   *  another project already has a model with that name (e.g. "Department__2"). */
   table_name:    string;
+  /** The name the user typed / should see (same for both projects' "Department"). */
+  domain_name?:  string;
   table_created?: boolean;   // true = just created, false = already existed
   action?:       string;     // "created" | "already existed"
   db_backend?:   string;     // "dynamodb" | "postgresql"
@@ -72,10 +105,14 @@ export interface BackendCreateResponse {
 
 export interface BackendSchemaEntry {
   table_name: string;
+  /** Visible name (the key `table_name` can carry a "__<project>" suffix). */
+  domain_name?: string;
+  label?: string | null;
   schema:     BackendSchemaField[];
   db_backend?: "dynamodb" | "postgresql";
   versioned?: boolean;
   project_id?: string | null;
+  module_id?: string | null;
 }
 
 export interface BackendSchemasListResponse {
@@ -104,7 +141,9 @@ export interface BackendRowsResponse {
 /** Map frontend FieldType → backend field type */
 export function frontendTypeToBackend(type: string): BackendFieldType {
   switch (type) {
+    case "relation": return "domain_model"; // field tagged as a domain model (FK / link to another domain)
     case "string":  return "text";
+    case "email":   return "text"; // backend has no email type — persisted as text + format:"email"
     case "number":  return "number";
     case "boolean": return "boolean";
     case "date":    return "date";
@@ -120,6 +159,7 @@ export function backendTypeToFrontend(type: BackendFieldType): string {
     case "number":        return "number";
     case "boolean":       return "boolean";
     case "date":          return "date";
+    case "domain_model":  return "relation";
     default:              return "string";
   }
 }
@@ -216,12 +256,19 @@ export function domainToBackendRequest(params: {
 
     const field: BackendSchemaField = {
       field_id: fieldName,
-      type:     frontendTypeToBackend(fieldDef.type),
+      // A field tagged as a domain model keeps that type. Besides type "relation",
+      // fields that carry relation metadata (FK columns are plain "string" fields
+      // with relationKind / relatedDomain) are persisted as "domain_model" too.
+      type:     (fieldDef.type === "relation" || fieldDef.relationKind || fieldDef.relatedDomain)
+                  ? "domain_model"
+                  : frontendTypeToBackend(fieldDef.type),
       label:    ui?.label ?? fieldName,
       value:    fieldDef.default ?? null,
     };
 
     if (fieldDef.datasource)  field.datasource  = fieldDef.datasource;
+    // Email fields are stored as text; the format tag is what restores the "email" type on load.
+    if (fieldDef.type === "email" || fieldDef.format === "email") field.format = "email";
     if (fieldDef.cardinality) field.cardinality = fieldDef.cardinality;
     if (ui?.component)        field.component   = ui.component;
     if (ui?.placeholder)      field.placeholder = ui.placeholder;
@@ -232,22 +279,21 @@ export function domainToBackendRequest(params: {
     // reassignable references (doctor/patient belongs to branch).
     if (fieldDef.relationKind) field.relationKind = fieldDef.relationKind;
 
-    // relatedDomain was missing from this same whitelist — relationKind
-    // ("association"/"integral") was being saved, but the actual target
-    // domain it points to was silently dropped on every save. That's why
-    // a freshly-created or freshly-re-saved relation field could show
-    // relationKind with an empty related_domain_model.linked_with on
-    // export: the backend genuinely never received the value to store.
-    // This is the save-side counterpart to the same gap already fixed in
-    // backendSchemaToFrontend() (the load side).
+    // relatedDomain: the actual target domain a relation points to. Without
+    // this, relationKind was saved but the target was silently dropped.
+    // This is the save-side counterpart to backendSchemaToFrontend().
     if (fieldDef.relatedDomain) field.relatedDomain = fieldDef.relatedDomain;
+    // One association field linking SEVERAL domains: the column stores which
+    // one was chosen, and this list is what the form's picker offers.
+    if (fieldDef.relatedDomains && fieldDef.relatedDomains.length > 1) field.relatedDomains = fieldDef.relatedDomains;
+    if (fieldDef.multiLinkDomain) field.multiLinkDomain = true;
+    // Owns / Uses label — saved as-is so the page builder can read it.
+    if (fieldDef.linkMode) field.linkMode = fieldDef.linkMode;
 
     // Resolve registry-attached rules (validationRefs) into real, flat
-    // rules the Form plugin can run — this was the actual gap: only
-    // fieldDef.validations (inline, one-off rules typed directly on the
-    // field) ever made it into the payload before. Clicking a Registry
-    // Rules chip attached a TAG to validationRefs, but that tag was never
-    // looked up or resolved here, so it silently vanished on save.
+    // rules the Form plugin can run. Inline validations alone were not
+    // enough: a tag attached via the Registry Rules chips has to be looked
+    // up and resolved here, or it silently vanishes on save.
     const refRules: FlatValidationRule[] = Array.isArray(fieldDef.validationRefs)
       ? fieldDef.validationRefs.flatMap((tag: string) => {
           const rule = registry[tag];
@@ -260,16 +306,13 @@ export function domainToBackendRequest(params: {
       : [];
     const inlineRules: FlatValidationRule[] = Array.isArray(fieldDef.validations) ? fieldDef.validations : [];
     const allValidations = [...refRules, ...inlineRules];
+    if (fieldDef.type === "email" && !hasEmailRule(allValidations)) allValidations.push({ ...EMAIL_RULE });
     if (allValidations.length > 0) field.validations = allValidations;
 
     // Also persist the raw tag list itself (not just the rules resolved
     // from it above) — backendSchemaToFrontend() reads validationRefs
-    // back on load to show the actual tag identity (e.g. "required-name")
-    // in the Validation Refs column and the Export tab's JSON. Without
-    // sending it here too, that identity is only ever present for fields
-    // saved before this fix; any field saved through this function keeps
-    // its enforced rules (field.validations still runs fine) but loses
-    // which named tag it came from on the next reload.
+    // back on load to show the tag identity (e.g. "required-name") in the
+    // Validation Refs column and the Export tab's JSON.
     if (Array.isArray(fieldDef.validationRefs) && fieldDef.validationRefs.length > 0) {
       field.validationRefs = fieldDef.validationRefs;
     }
@@ -296,7 +339,8 @@ export function backendSchemaToFrontend(entry: BackendSchemaEntry): {
   fields:     Record<string, {
     type: string; default?: any; datasource?: string;
     cardinality?: string; relationKind?: string;
-    relatedDomain?: string; validationRefs?: string[];
+    relatedDomain?: string; relatedDomains?: string[]; multiLinkDomain?: boolean; validationRefs?: string[];
+    linkMode?: "owns" | "uses";
   }>;
   uiHints:    Record<string, Record<string, any>>;
   rbacRules:  Record<string, Record<string, any>>;
@@ -313,22 +357,18 @@ export function backendSchemaToFrontend(entry: BackendSchemaEntry): {
     const path = `${table_name}.${field.field_id}`;
 
     fields[field.field_id] = {
-      type:           backendTypeToFrontend(field.type),
+      type:           (field as any).format === "email" ? "email" : backendTypeToFrontend(field.type),
       default:        field.value ?? undefined,
       datasource:     field.datasource,
       cardinality:    field.cardinality ?? undefined,
       relationKind:   field.relationKind ?? undefined,
-      // These two were missing entirely — the raw backend field object
-      // already carries them (see the /datastore/schemas response: each
-      // field has "relatedDomain": "contact" etc. right alongside
-      // relationKind), but this function silently dropped them on the
-      // way into the frontend's field shape. That's why every relation
-      // came back empty on reload/import even though the backend had it
-      // stored correctly all along — downstream code (handleLoadFromBackend
-      // in SchemaInspector.tsx) reads relatedDomain/validationRefs off of
-      // exactly this returned object, so if they're missing here, no
-      // amount of "whitelisting" further downstream can recover them.
+      // The raw backend field already carries relatedDomain/validationRefs;
+      // downstream code (handleLoadFromBackend in SchemaInspector.tsx) reads
+      // them off this returned object, so they must be passed through here.
       relatedDomain:  field.relatedDomain ?? undefined,
+      relatedDomains: field.relatedDomains ?? undefined,
+      multiLinkDomain: field.multiLinkDomain ?? undefined,
+      linkMode:       field.linkMode ?? undefined,
       validationRefs: field.validationRefs ?? undefined,
     };
 
@@ -359,6 +399,7 @@ export interface DraftTableSpec extends BackendCreateRequest {}
 export interface SaveDraftRequest {
   domain_name: string;
   project_id?: string | number | null;
+  module_id?:  string | number | null;
   tables:      DraftTableSpec[];
   /** Opaque builder state, round-tripped so an unfinished domain reopens
    *  exactly as it was left (the FieldDraft map + the CreateDomainPayload
@@ -373,6 +414,7 @@ export interface BackendDraft {
   id:            string;
   domain_name:   string;
   project_id:    string | null;
+  module_id?:    string | null;
   status:        "draft" | "submitted";
   payload:       SaveDraftRequest & Record<string, any>;
   created_by:    string | null;
@@ -421,41 +463,124 @@ export interface BackendValidationRulesListResponse {
 // API functions
 // ════════════════════════════════════════════════════════════════════════════
 
-async function apiFetch(path: string, init?: RequestInit): Promise<any> {
+/**
+ * Shared authenticated fetch. EXPORTED so other API modules (e.g.
+ * abacApi.ts, rbac APIs) can reuse the exact same auth handling instead
+ * of rolling their own raw fetch — a raw fetch without the Authorization
+ * header is what produces FastAPI's plain "Not authenticated" response.
+ *
+ *  - Sends `Authorization: Bearer <token>` when a token is available.
+ *  - 401 → logs the user out (session is gone/invalid).
+ *  - 403 → throws PermissionError with the backend's `detail` text.
+ *  - Any other failure → throws Error("API <status>: <body>").
+ */
+export async function apiFetch(path: string, init?: RequestInit): Promise<any> {
   const token = resolveToken();
   const headers: Record<string, string> = { "Content-Type": "application/json" };
   if (token) headers["Authorization"] = `Bearer ${token}`;
 
-  const res = await fetch(`${API_BASE}${path}`, { headers, ...init });
+  // Merge caller-supplied headers ON TOP of the defaults instead of letting
+  // `...init` replace the whole headers object (which would silently drop
+  // the Authorization header whenever a caller passes any headers at all).
+  const res = await fetch(`${API_BASE}${path}`, {
+    ...init,
+    headers: { ...headers, ...((init?.headers as Record<string, string> | undefined) ?? {}) },
+  });
   if (!res.ok) {
     if (res.status === 401) {
       useAuthStore.getState().logout();
     }
     const text = await res.text().catch(() => res.statusText);
+    if (res.status === 403) throw new PermissionError(extractDetail(text) || "Permission denied");
     throw new Error(`API ${res.status}: ${text}`);
   }
   return res.json();
 }
 
 /**
+ * Project → Module scope used by every call below.
+ *  - project omitted (undefined) → use the currently-selected project, and
+ *    (if module is also omitted) the currently-selected module.
+ *  - project given explicitly   → the selected module is NOT borrowed,
+ *    because it belongs to the *selected* project and may not belong to
+ *    this one (the backend rejects a project/module mismatch). Pass
+ *    `module` explicitly to scope to a module of that project.
+ *  - explicit `null` always means "none".
+ */
+function resolveScope(
+  project: string | number | null | undefined,
+  module:  string | number | null | undefined,
+): { project_id: string | number | null; module_id: string | number | null } {
+  const state = useProjectStore.getState();
+  const project_id = project !== undefined ? project : state.currentProjectId;
+  const module_id =
+    module !== undefined ? module
+    : project === undefined ? state.currentModuleId
+    : null;
+  return { project_id, module_id };
+}
+
+const DOMAIN_RBAC_ACTIONS = ["create", "view", "edit", "delete"];
+
+/**
+ * Make sure a domain model has an RBAC resource (+ create/view/edit/delete
+ * actions) so it shows up in Access Control and a role can be granted Delete
+ * on it. Best-effort: users who may not manage RBAC (403) are skipped silently.
+ * Afterwards the signed-in user's permissions are re-read so a fresh grant
+ * shows up without logging out.
+ */
+export async function ensureDomainRbacResource(domainName: string): Promise<void> {
+  if (!domainName) return;
+  try {
+    const list: any[] = (await apiListResources()).data ?? [];
+    const existing = list.find((r) => String(r.name).toLowerCase() === domainName.toLowerCase());
+    let id: string | undefined = existing?.id;
+    if (!id) {
+      const label = domainName.charAt(0).toUpperCase() + domainName.slice(1);
+      id = (await apiCreateResource(label, `Domain model: ${domainName}`)).data.id as string;
+    }
+    let perms: any[] = existing?.permissions ?? [];
+    if (typeof perms === "string") { try { perms = JSON.parse(perms); } catch { perms = []; } }
+    const have = new Set(perms.map((p) => String(p.action).toLowerCase()));
+    for (const action of DOMAIN_RBAC_ACTIONS) if (!have.has(action)) await apiCreatePermission(id!, action);
+  } catch { /* not permitted / backend unreachable — an admin can still Sync in RBAC → Resources */ }
+  await refreshAuthContext();
+}
+
+/** Re-read roles/permissions from /auth/me into the auth store. */
+export async function refreshAuthContext(): Promise<void> {
+  const { token, setAuthContext } = useAuthStore.getState();
+  if (!token) return;
+  const ctx = await apiFetchMe(token);
+  if (ctx) setAuthContext(ctx);
+}
+
+
+/**
  * POST /datastore/create — create a table from a schema.
  *
  * If `req.project_id` isn't explicitly set, this scopes the new domain
  * model to whichever project is currently selected (ProjectSelector.tsx)
- * — every one of SchemaInspector.tsx's ~10 create-domain call sites gets
- * project scoping "for free" this way, without each needing to be
- * touched individually. Pass `project_id: null` explicitly to force
- * "no project" regardless of what's currently selected.
+ * — every create-domain call site in SchemaInspector.tsx gets project
+ * scoping "for free" this way. Pass `project_id: null` explicitly to
+ * force "no project" regardless of what's currently selected.
  */
 export async function apiCreateDomain(req: BackendCreateRequest): Promise<BackendCreateResponse> {
-  const project_id = req.project_id !== undefined
-    ? req.project_id
-    : useProjectStore.getState().currentProjectId;
+  const { project_id, module_id } = resolveScope(req.project_id, req.module_id);
 
-  return apiFetch("/datastore/create", {
+  const res = await apiFetch("/datastore/create", {
     method: "POST",
-    body:   JSON.stringify({ ...req, project_id: project_id ?? undefined }),
+    body:   JSON.stringify({
+      ...req,
+      project_id: project_id ?? undefined,
+      module_id:  module_id  ?? undefined,
+    }),
   });
+  // Let the sidebar tree pick up the new domain model.
+  useProjectStore.getState().bumpTree();
+  // Register it in RBAC so Delete/Edit grants can be given on it.
+  await ensureDomainRbacResource(req.table_name);
+  return res;
 }
 
 /**
@@ -474,13 +599,15 @@ export async function apiCreateDomain(req: BackendCreateRequest): Promise<Backen
 export async function apiSaveDraft(
   req: SaveDraftRequest,
 ): Promise<{ status: string; draft_id: string; action?: string; message?: string }> {
-  const project_id = req.project_id !== undefined
-    ? req.project_id
-    : useProjectStore.getState().currentProjectId;
+  const { project_id, module_id } = resolveScope(req.project_id, req.module_id);
 
   return apiFetch("/datastore/drafts", {
     method: "POST",
-    body:   JSON.stringify({ ...req, project_id: project_id ?? undefined }),
+    body:   JSON.stringify({
+      ...req,
+      project_id: project_id ?? undefined,
+      module_id:  module_id  ?? undefined,
+    }),
   });
 }
 
@@ -488,13 +615,13 @@ export async function apiSaveDraft(
 export async function apiListDrafts(
   projectId?: string | null,
   status: "draft" | "submitted" | "all" = "draft",
+  moduleId?: string | null,
 ): Promise<BackendDraftListResponse> {
-  const effectiveId = projectId !== undefined
-    ? projectId
-    : useProjectStore.getState().currentProjectId;
+  const { project_id: effectiveId, module_id: effectiveModule } = resolveScope(projectId, moduleId);
 
   const params = new URLSearchParams({ status });
   if (effectiveId) params.set("project_id", String(effectiveId));
+  if (effectiveModule) params.set("module_id", String(effectiveModule));
   return apiFetch(`/datastore/drafts?${params.toString()}`);
 }
 
@@ -516,7 +643,15 @@ export async function apiDeleteDraft(draftId: string): Promise<{ status: string;
  * and reports which ones failed, so it can be fixed and resubmitted.
  */
 export async function apiSubmitDraft(draftId: string): Promise<BackendSubmitDraftResponse> {
-  return apiFetch(`/datastore/drafts/${encodeURIComponent(draftId)}/submit`, { method: "POST" });
+  const res = await apiFetch(`/datastore/drafts/${encodeURIComponent(draftId)}/submit`, { method: "POST" });
+  // Submitting generates real domain models — refresh the sidebar tree.
+  useProjectStore.getState().bumpTree();
+  const created: any[] = res?.tables ?? res?.created ?? res?.results ?? [];
+  for (const t of created) {
+    const n = typeof t === "string" ? t : t?.table_name;
+    if (n) await ensureDomainRbacResource(n);
+  }
+  return res;
 }
 
 /**
@@ -526,18 +661,69 @@ export async function apiSubmitDraft(draftId: string): Promise<BackendSubmitDraf
  */
 export async function apiListSchemas(
   projectId?: string | null,
+  moduleId?: string | null,
 ): Promise<BackendSchemasListResponse> {
-  const effectiveId = projectId !== undefined
-    ? projectId
-    : useProjectStore.getState().currentProjectId;
+  const { project_id: effectiveId, module_id: effectiveModule } = resolveScope(projectId, moduleId);
 
-  const query = effectiveId ? `?project_id=${encodeURIComponent(effectiveId)}` : "";
+  const params = new URLSearchParams();
+  if (effectiveId) params.set("project_id", String(effectiveId));
+  if (effectiveModule) params.set("module_id", String(effectiveModule));
+  const query = params.toString() ? `?${params.toString()}` : "";
   return apiFetch(`/datastore/schemas${query}`);
 }
 
 /** GET /datastore/schemas/{table_name} — get schema for one table */
 export async function apiGetSchema(tableName: string): Promise<BackendSchemaResponse> {
   return apiFetch(`/datastore/schemas/${tableName}`);
+}
+
+/** DELETE /datastore/schemas/{table} — delete a domain model (and by default its table + data) */
+export async function apiDeleteDomain(
+  tableName: string,
+  dropTable = true,
+): Promise<{ status: string; table_name?: string }> {
+  const res = await apiFetch(
+    `/datastore/schemas/${encodeURIComponent(tableName)}?drop_table=${dropTable}`,
+    { method: "DELETE" },
+  );
+  useProjectStore.getState().bumpTree();
+  return res;
+}
+
+/** PUT /datastore/schemas/{table} — rename a domain model and/or move it to another project/module */
+export async function apiUpdateDomain(
+  tableName: string,
+  body: { new_table_name?: string; project_id?: string | number | null; module_id?: string | number | null },
+): Promise<{ status: string; table_name?: string; old_name?: string }> {
+  const res = await apiFetch(`/datastore/schemas/${encodeURIComponent(tableName)}`, {
+    method: "PUT",
+    body:   JSON.stringify(body),
+  });
+  useProjectStore.getState().bumpTree();
+  return res;
+}
+
+/** DELETE /datastore/schemas/{table}/fields/{field} — delete one attribute */
+export async function apiDeleteField(
+  tableName: string,
+  fieldId: string,
+): Promise<{ status: string }> {
+  return apiFetch(
+    `/datastore/schemas/${encodeURIComponent(tableName)}/fields/${encodeURIComponent(fieldId)}`,
+    { method: "DELETE" },
+  );
+}
+
+/** PUT /datastore/schemas/{table}/fields/{field} — rename and/or retype one attribute */
+export async function apiUpdateField(
+  tableName: string,
+  fieldId: string,
+  body: { new_field_id?: string; type?: BackendFieldType; label?: string },
+): Promise<{ status: string; field_id?: string }> {
+  return apiFetch(
+    `/datastore/schemas/${encodeURIComponent(tableName)}/fields/${encodeURIComponent(fieldId)}`,
+    { method: "PUT", body: JSON.stringify(body) },
+  );
 }
 
 /** POST /datastore/{table_name}/row — insert a data row */
@@ -611,9 +797,10 @@ export async function apiSaveValidationRule(
   });
 }
 
+/** DELETE /datastore/validation-rules/{tag} — now goes through apiFetch so it
+ *  sends the Authorization header (the old raw fetch did not). */
 export async function apiDeleteValidationRule(tag: string): Promise<{ status: string; message?: string }> {
-  const res = await fetch(`${API_BASE}/datastore/validation-rules/${encodeURIComponent(tag)}`, {
+  return apiFetch(`/datastore/validation-rules/${encodeURIComponent(tag)}`, {
     method: "DELETE",
   });
-  return res.json();
 }

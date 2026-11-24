@@ -1,4 +1,5 @@
-import type { AllSchemas, FieldUIConfig, NamedValidationRule } from "../../schema/types";
+import { toCamelCase } from "../../schema/casting";
+import type { AllSchemas, FieldUIConfig, NamedValidationRule, RBACFieldRule, ABACFieldRule } from "../../schema/types";
 
 //
 // Two independent, attribute_id-referenced structures, matching the layer
@@ -11,22 +12,36 @@ import type { AllSchemas, FieldUIConfig, NamedValidationRule } from "../../schem
 // stored in.
 
 /**
- * Instead of a generic role: "parent"|"child" enum, the KEY NAME itself
- * carries the relationship semantics:
- *  - association → { kind: "association", linked_with: <domain> }
- *  - integral, this domain is the child (the real stored FK) →
- *      { kind: "integral", part_of: <parent domain> }
- *  - integral, this domain is the parent (the synthesized reverse
- *    attribute — see synthesizeReverseAttributes below) →
- *      { kind: "integral", contains: <child domain> }
- * Each variant only ever has ONE of linked_with/part_of/contains — never
- * more than one, and the key itself is enough to tell which side/kind of
- * relationship this is without a separate role field.
+ * Relationship metadata for a relation attribute:
+ *  - linked_to         → the other domain model
+ *  - relationship_type → "association" (loose reference, junction table) or
+ *                        "integral" (composition — the child only exists
+ *                        under its owner)
+ *  - owned_by          → for integral links, the owning (parent) domain —
+ *                        the same on both sides of the link; "NA" for
+ *                        associations, which have no owner.
  */
-export type ExportedRelation =
-  | { kind: "association"; linked_with: string }
-  | { kind: "integral"; part_of: string }
-  | { kind: "integral"; contains: string };
+export interface ExportedRelation {
+  /** A list when one attribute links several domains at once (associations only). */
+  linked_to: string | string[];
+  relationship_type: "association" | "integral";
+  owned_by: string;
+}
+
+/** One ABAC rule: { name, effect, roles, conditions? } — no ids, no actions, no fields. */
+export type ExportedAbacRule = Record<string, any>;
+
+/**
+ * Access control embedded directly on the attribute it applies to.
+ * Every key is optional and omitted when empty.
+ *  - rbac            → field-level role arrays: { visible?: string[], read?, write?, disabled? }
+ *  - abac_expression → field-level runtime expressions: { visible?: string|boolean, disabled?, read?, write? }
+ */
+export interface ExportedAccess {
+  rbac?: RBACFieldRule;
+  abac?: ExportedAbacRule[];
+  abac_expression?: ABACFieldRule;
+}
 
 export interface ExportedDomainField {
   attribute_id: string;
@@ -40,10 +55,26 @@ export interface ExportedDomainField {
    *  present when non-empty, matching how branch.active (no validations)
    *  omits the key entirely rather than showing an empty array. */
   validations?: string[];
+  /** RBAC / ABAC rules for this attribute — only present when at least one is defined. */
+  access?: ExportedAccess;
+}
+
+/**
+ * Domain-level access control (the Access Control screen's data, stored in the backend):
+ *  - rbac → role name → actions that role may perform on this domain model,
+ *           e.g. { "Admin": ["create","view","edit","delete"], "Viewer": ["view"] }
+ *  - abac → ABAC rules (ids stripped): name, effect, roles and optional conditions.
+ *           Rules are domain-level only; there is no per-field targeting.
+ */
+export interface ExportedDomainAccess {
+  rbac?: Record<string, string[]>;
+  abac?: ExportedAbacRule[];
 }
 
 export interface ExportedDomain {
   name: string;
+  /** Domain-level RBAC / ABAC — only present when something is configured for this domain. */
+  access?: ExportedDomainAccess;
   attributes: ExportedDomainField[];
 }
 
@@ -58,65 +89,230 @@ export function pluralize(word: string): string {
   return `${word}s`;
 }
 
+/** Junction tables (`A_B` with exactly the two FK columns `AId` and `BId`)
+ *  are an implementation detail of associations — recreated on import — so
+ *  they're left out of the export. */
+function isJunctionDomain(name: string, fields: Record<string, any>): boolean {
+  const keys = Object.keys(fields);
+  if (keys.length !== 2 || !name.includes("_")) return false;
+  const [a, ...rest] = name.split("_");
+  const b = rest.join("_");
+  return keys.includes(`${a}Id`) && keys.includes(`${b}Id`);
+}
+
+/** A child-side integral FK is a single-valued "xId" field; the parent-side
+ *  link is the to-many attribute (e.g. vehicleModels). */
+function isChildFk(fieldName: string, fieldDef: any): boolean {
+  return fieldDef.cardinality !== "list" && /Id$/.test(fieldName);
+}
+
+/** Resolves the related domain even when only the FK naming convention
+ *  survives (the backend doesn't persist relatedDomain, so after a reload a
+ *  FK like manufacturerId is a plain string with relationKind "integral"). */
+function resolveRelatedDomain(fieldName: string, fieldDef: any, allDomains: AllSchemas["domains"]): string {
+  if (fieldDef.relatedDomain) return fieldDef.relatedDomain;
+  if (fieldName.endsWith("Id")) {
+    const stem = fieldName.slice(0, -2).toLowerCase();
+    const match = Object.keys(allDomains).find((d) => d.toLowerCase() === stem);
+    if (match) return match;
+  }
+  return "";
+}
+
 /**
- * For every domain, finds every OTHER domain with an "integral" relation
- * pointing AT it (e.g. branch.clinic_id → clinic) and synthesizes a
- * virtual "many" attribute representing the reverse direction (e.g.
- * clinic gets a synthesized "branches" attribute, tagged `contains:
- * "branch"`). This attribute has no real backing column anywhere — it
- * exists only in this export, to make the parent→children relationship
- * visible from the parent's own side too, not just discoverable by
- * scanning every other domain for FKs. No `validations` key is added
- * here — there's no real validation registry entry for a field that
- * doesn't actually exist, so nothing is fabricated for it.
+ * Synthesizes the parent-side attribute for every integral FK pointing AT
+ * this domain (e.g. VehicleModel.manufacturerId → Manufacturer gives
+ * Manufacturer a "vehicleModels" attribute), unless the parent already has
+ * an explicit attribute linking to that child. It has no backing column —
+ * it only makes the parent→children link visible from the parent's side.
  */
 export function synthesizeReverseAttributes(domainName: string, allDomains: AllSchemas["domains"]): ExportedDomainField[] {
   const reverse: ExportedDomainField[] = [];
+  const ownFields = allDomains[domainName]?.fields ?? {};
   for (const [childDomainName, childDef] of Object.entries(allDomains)) {
-    if (childDomainName === domainName) continue;
-    for (const fieldDef of Object.values(childDef.fields)) {
-      const relationKind = (fieldDef as any).relationKind;
-      if (relationKind === "integral" && fieldDef.relatedDomain === domainName) {
-        reverse.push({
-          attribute_id: pluralize(childDomainName),
-          type: "text",
-          cardinality: "many",
-          related_domain_model: { kind: "integral", contains: childDomainName },
-        });
-      }
-    }
+    if (childDomainName === domainName || isJunctionDomain(childDomainName, childDef.fields)) continue;
+    const hasFkToMe = Object.entries(childDef.fields).some(([fn, fd]) =>
+      (fd as any).relationKind === "integral" && isChildFk(fn, fd) && resolveRelatedDomain(fn, fd, allDomains) === domainName);
+    if (!hasFkToMe) continue;
+    const alreadyExplicit = Object.entries(ownFields).some(([fn, fd]) =>
+      (fd as any).relationKind === "integral" && !isChildFk(fn, fd) && fd.relatedDomain === childDomainName);
+    if (alreadyExplicit) continue;
+    reverse.push({
+      attribute_id: toCamelCase(pluralize(childDomainName)),
+      type: "domain_model",
+      cardinality: "many",
+      related_domain_model: { linked_to: childDomainName, relationship_type: "integral", owned_by: domainName },
+    });
   }
   return reverse;
 }
 
-export function buildDomainModelJson(schemas: AllSchemas): { domain_models: ExportedDomain[] } {
-  const domain_models: ExportedDomain[] = Object.entries(schemas.domains).map(([domainName, def]) => {
+/** Looks up the RBAC / ABAC rule stored under "domain.attribute" and returns
+ *  them as one inline block (or undefined when the attribute has neither). */
+function buildAccessBlock(schemas: AllSchemas, path: string): ExportedAccess | undefined {
+  const rbac = schemas._layers?.rbac?.fields?.[path];
+  const abac = schemas._layers?.abac?.rules?.[path];
+  const out: ExportedAccess = {};
+  if (rbac && Object.keys(rbac).length > 0) out.rbac = rbac;
+  if (abac && Object.keys(abac).length > 0) out.abac_expression = abac;
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
+export function buildDomainModelJson(
+  schemas: AllSchemas,
+  /** Domain-level RBAC/ABAC keyed by domain name (see loadDomainAccess in accessLoader.ts). */
+  domainAccess: Record<string, ExportedDomainAccess> = {},
+): { domain_models: ExportedDomain[] } {
+  const accessByLower = new Map(Object.entries(domainAccess).map(([k, v]) => [k.toLowerCase(), v]));
+  const domain_models: ExportedDomain[] = Object.entries(schemas.domains)
+    .filter(([domainName, def]) => !isJunctionDomain(domainName, def.fields))
+    .map(([domainName, def]) => {
     const realAttributes: ExportedDomainField[] = Object.entries(def.fields).map(([fieldName, fieldDef]) => {
+      const relationKind = (fieldDef as any).relationKind;
+      const isRelation = fieldDef.type === "relation" || relationKind === "association" || relationKind === "integral";
       const out: ExportedDomainField = {
         attribute_id: fieldName,
-        type: fieldDef.type === "relation" ? "domain model" : fieldDef.type === "string" ? "text" : fieldDef.type,
-        cardinality: fieldDef.cardinality === "list" ? "many" : "one",
+        type: isRelation ? "domain_model" : fieldDef.type === "string" ? "text" : fieldDef.type,
+        cardinality: fieldDef.cardinality === "list" || fieldDef.cardinality === "many" ? "many" : "one",
       };
-      const relationKind = (fieldDef as any).relationKind;
-      const relatedDomain = fieldDef.relatedDomain ?? "";
+      const relatedDomain = resolveRelatedDomain(fieldName, fieldDef, schemas.domains);
       if (relationKind === "association") {
-        out.related_domain_model = { kind: "association", linked_with: relatedDomain };
+        // One field linking several domains exports its linked_to as a list.
+        const many = (fieldDef as any).relatedDomains as string[] | undefined;
+        out.related_domain_model = {
+          linked_to: many && many.length > 1 ? many : relatedDomain,
+          relationship_type: "association", owned_by: "NA",
+        };
       } else if (relationKind === "integral") {
-        // This is always the real stored FK (the child side) — the
-        // synthesized reverse/parent side is added separately below via
-        // synthesizeReverseAttributes, never here.
-        out.related_domain_model = { kind: "integral", part_of: relatedDomain };
+        // Child side (real stored FK): owner is the related domain.
+        // Parent side (explicit to-many attribute): owner is this domain.
+        const owner = isChildFk(fieldName, fieldDef) ? relatedDomain : domainName;
+        out.related_domain_model = { linked_to: relatedDomain, relationship_type: "integral", owned_by: owner };
       }
       const validationRefs = schemas._layers?.validationRefs?.[`${domainName}.${fieldName}`];
       if (validationRefs && validationRefs.length > 0) out.validations = validationRefs;
+      const access = buildAccessBlock(schemas, `${domainName}.${fieldName}`);
+      if (access) out.access = access;
       return out;
     });
 
     const reverseAttributes = synthesizeReverseAttributes(domainName, schemas.domains);
 
-    return { name: domainName, attributes: [...realAttributes, ...reverseAttributes] };
+    // Every domain's table has an implicit primary key (the backend's own
+    // "id" column) that never appears as a user-defined field. Surface it
+    // as the first attribute — `<domain>Id`, unique + required — unless the
+    // domain already declares its own (`<domain>Id` or `id`).
+    const primaryKeyName = `${toCamelCase(domainName)}Id`;
+    const hasOwnPrimaryKey = Object.keys(def.fields).some((f) => f === primaryKeyName || f === "id");
+    const primaryKeyAccess = buildAccessBlock(schemas, `${domainName}.${primaryKeyName}`);
+    const primaryKey: ExportedDomainField[] = hasOwnPrimaryKey ? [] : [{
+      attribute_id: primaryKeyName,
+      type: "text",
+      cardinality: "one",
+      validations: ["unique", "required"],
+      ...(primaryKeyAccess ? { access: primaryKeyAccess } : {}),
+    }];
+
+    const allAttributes = [...primaryKey, ...realAttributes, ...reverseAttributes];
+
+    // ABAC: rules are domain-level (name, effect, roles, conditions). A leftover
+    // `fields` key on rules saved earlier is dropped, so no empty `fields: []` is exported.
+    const domainLevelAccess = accessByLower.get(domainName.toLowerCase());
+    const domainAbac: ExportedAbacRule[] = (domainLevelAccess?.abac ?? []).map((rule) => {
+      const { fields: _legacyFields, ...ruleBody } = rule as any;
+      return ruleBody;
+    });
+    const domainAccessOut: ExportedDomainAccess = {};
+    if (domainLevelAccess?.rbac && Object.keys(domainLevelAccess.rbac).length) domainAccessOut.rbac = domainLevelAccess.rbac;
+    if (domainAbac.length) domainAccessOut.abac = domainAbac;
+    return {
+      name: domainName,
+      ...(domainAccessOut.rbac || domainAccessOut.abac ? { access: domainAccessOut } : {}),
+      attributes: allAttributes,
+    };
   });
   return { domain_models };
+}
+
+// ── Project → Module → Domain model structure ───────────────────────────────
+
+export interface ExportedModule {
+  name: string;
+  description?: string;
+  domain_models: ExportedDomain[];
+}
+export interface ExportedProject {
+  name: string;
+  description?: string;
+  modules: ExportedModule[];
+  /** Domain models in this project that aren't in any module — omitted when none. */
+  domain_models?: ExportedDomain[];
+}
+export interface ExportedStructure {
+  projects: ExportedProject[];
+  /** Domain models that belong to no project — omitted when none. */
+  domain_models?: ExportedDomain[];
+}
+
+/** What the export needs to know about the hierarchy (all ids come from the backend). */
+export interface ExportScope {
+  projects: { id: string; name: string; description?: string | null }[];
+  modules:  { id: string; project_id: string; name: string; description?: string | null }[];
+  /** domainName → project_id / module_id (SchemaInspector's extra.projectIds / moduleIds). */
+  projectIds: Record<string, string>;
+  moduleIds:  Record<string, string>;
+}
+
+/**
+ * Same per-domain JSON as buildDomainModelJson(), nested the way the app is
+ * organised: Project → Module → Domain models. Every project and module is
+ * listed even when empty, so the structure round-trips through Import.
+ *
+ *   { "projects": [ { "name", "modules": [ { "name", "domain_models": [...] } ],
+ *                     "domain_models"?: [...] } ],
+ *     "domain_models"?: [...] }
+ */
+export function buildProjectStructureJson(
+  schemas: AllSchemas,
+  scope: ExportScope,
+  domainAccess: Record<string, ExportedDomainAccess> = {},
+): ExportedStructure {
+  const flat = buildDomainModelJson(schemas, domainAccess).domain_models;
+  const byModule  = new Map<string, ExportedDomain[]>();
+  const byProject = new Map<string, ExportedDomain[]>(); // project, no module
+  const unassigned: ExportedDomain[] = [];
+  const push = (m: Map<string, ExportedDomain[]>, k: string, d: ExportedDomain) => {
+    const list = m.get(k); if (list) list.push(d); else m.set(k, [d]);
+  };
+
+  const projectIdSet = new Set(scope.projects.map((p) => p.id));
+  const moduleById = new Map(scope.modules.map((m) => [m.id, m]));
+  for (const d of flat) {
+    const pid = scope.projectIds[d.name];
+    const mid = scope.moduleIds[d.name];
+    const mod = mid ? moduleById.get(mid) : undefined;
+    if (mod && projectIdSet.has(mod.project_id)) push(byModule, mod.id, d);
+    else if (pid && projectIdSet.has(pid)) push(byProject, pid, d);
+    else unassigned.push(d);
+  }
+
+  const projects: ExportedProject[] = scope.projects.map((p) => {
+    const loose = byProject.get(p.id) ?? [];
+    return {
+      name: p.name,
+      ...(p.description ? { description: p.description } : {}),
+      modules: scope.modules
+        .filter((m) => m.project_id === p.id)
+        .map((m) => ({
+          name: m.name,
+          ...(m.description ? { description: m.description } : {}),
+          domain_models: byModule.get(m.id) ?? [],
+        })),
+      ...(loose.length ? { domain_models: loose } : {}),
+    };
+  });
+
+  return { projects, ...(unassigned.length ? { domain_models: unassigned } : {}) };
 }
 
 /** Keyed "domainName.attribute_id" → just the UI-facing properties, no

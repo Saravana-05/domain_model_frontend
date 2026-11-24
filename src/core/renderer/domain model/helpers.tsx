@@ -20,9 +20,24 @@ export function dbLocation(res: BackendCreateResponse): string {
   return "database";
 }
 
+/** Outcome of ensuring one junction table exists (see ensureJunctionDomain
+ *  in SchemaInspector). "exists" covers both "already in the schema" and
+ *  "backend said it was already there"; "skipped" means this exact pair
+ *  was already handled earlier in the session. */
+export interface JunctionResult {
+  name:     string;
+  status:   "created" | "exists" | "skipped" | "failed";
+  message?: string;
+}
+
 export function buildJunctionDomain(
   parentDomainName: string,
   relatedDomainName: string,
+  /** "list" = a record can link to MANY related records (the form then
+   *  offers "+ Add"); otherwise the form shows a single normal entry. */
+  cardinality?: string,
+  /** Owns / Uses label — stored on the owning FK column, metadata only. */
+  linkMode?: "owns" | "uses",
 ): DomainDefinition {
   const junctionName = `${parentDomainName}_${relatedDomainName}`;
   const parentIdField  = `${parentDomainName}Id`;
@@ -30,8 +45,8 @@ export function buildJunctionDomain(
   return {
     name: junctionName,
     fields: {
-      [parentIdField]:  { type: "string" },
-      [relatedIdField]: { type: "string" },
+      [parentIdField]:  linkMode ? { type: "string", linkMode } : { type: "string" },
+      [relatedIdField]: cardinality ? { type: "string", cardinality: cardinality as any } : { type: "string" },
     },
   };
 }

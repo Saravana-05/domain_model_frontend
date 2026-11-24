@@ -26,6 +26,7 @@ export function LoginScreen({ sessionExpired }: { sessionExpired?: boolean } = {
         email: d.mail_id,
         role: d.role,
         orgId: d.organization_id ?? null,
+        roles: d.roles ?? [],
         permissions: d.permissions ?? [],
       });
     } catch (err: any) {

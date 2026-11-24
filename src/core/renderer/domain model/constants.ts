@@ -1,6 +1,6 @@
 import type { FieldType, ComponentType, FontSize, FontWeight, TextAlign, FieldWidth } from "../../schema/types";
 
-export const FIELD_TYPES: FieldType[] = ["string", "number", "decimal", "boolean", "date", "image", "relation"];
+export const FIELD_TYPES: FieldType[] = ["string", "email", "number", "decimal", "boolean", "date", "image", "relation"];
 /** Display label only — the underlying FieldType value ("string"/"relation")
  *  stays exactly as-is everywhere else (backend requests, internal state,
  *  the FieldType union itself); this only changes what the person sees in
@@ -8,7 +8,7 @@ export const FIELD_TYPES: FieldType[] = ["string", "number", "decimal", "boolean
  *  same as before. */
 export const FIELD_TYPE_LABELS: Partial<Record<FieldType, string>> = {
   string: "text",
-  relation: "domain model",
+  relation: "domain_model",
 };
 export const COMPONENTS:  ComponentType[] = ["text", "number", "select", "checkbox", "textarea", "date"];
 export const FONT_SIZES:  FontSize[]      = ["xs", "sm", "base", "lg", "xl", "2xl"];

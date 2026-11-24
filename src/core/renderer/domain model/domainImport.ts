@@ -1,4 +1,4 @@
-import type { DomainDefinition, DomainFieldCore, FieldType } from "../../schema/types";
+import type { DomainDefinition, DomainFieldCore, FieldType, RBACFieldRule, ABACFieldRule } from "../../schema/types";
 import { toPascalCase, toCamelCase } from "../../schema/casting";
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -8,19 +8,40 @@ import { toPascalCase, toCamelCase } from "../../schema/casting";
 // SchemaInspector.tsx (see the "Export" tab → "Domain model JSON" card).
 // Anything that comes out of that export should round-trip back in here.
 //
-// Shape expected (either form is accepted):
+// Shape expected (any of these forms is accepted):
+//   { "projects": [ { "name": "...", "description"?: "...",
+//                     "modules": [ { "name": "...", "description"?: "...", "domain_models": [ ... ] } ],
+//                     "domain_models"?: [ ... ]            // in the project, but in no module
+//                   } ],
+//     "domain_models"?: [ ... ]                            // in no project at all
+//   }
 //   { "domain_models": [ { "name": "...", "attributes": [ ... ] }, ... ] }
 //   [ { "name": "...", "attributes": [ ... ] }, ... ]
+//
+// Each domain may also carry domain-level access control:
+//   "access": {
+//     "rbac": { "Admin": ["create","view","edit","delete"], "Viewer": ["view"] },   // role → actions
+//     "abac": [ { "name": "...", "effect": "allow"|"deny", "roles": [...], "conditions"?: [...], "fields": [...] } ]
+//   }
 //
 // Each attribute:
 //   {
 //     "attribute_id": "clinicId",
 //     "type": "text" | "number" | "boolean" | "date" | "list" | "image" | "domain model",
 //     "cardinality": "one" | "many",
-//     "related_domain_model"?: { "kind": "association", "linked_with": "clinic" }
+//     "related_domain_model"?: { "linked_to": "VehicleModel",
+//                                "relationship_type": "integral" | "association",
+//                                "owned_by": "Manufacturer" | "NA" }
+//                             (legacy shapes below are still accepted)
+//                             { "kind": "association", "linked_with": "clinic" }
 //                             | { "kind": "integral",    "part_of":    "clinic" }
 //                             | { "kind": "integral",    "contains":   "branch" },
-//     "validations"?: ["required-name", ...]
+//     "validations"?: ["required-name", ...],
+//     "access"?: {
+//       "rbac"?: { "visible"?: ["admin"], "read"?: [...], "write"?: [...], "disabled"?: [...] },   // field-level roles
+//       "abac"?: [ { "name": "...", "effect": "allow"|"deny", "roles": [...], "conditions"?: [...] } ], // ABAC rules targeting THIS attribute
+//       "abac_expression"?: { "visible"?: "user.country != ''", "write"?: false, ... }             // field-level expressions
+//     }
 //   }
 //
 // "integral" + "contains" attributes are the export's *synthesized* reverse
@@ -46,25 +67,203 @@ export interface DomainModelImportResult {
    * saveRelationMarker() so they survive a reload the same way.
    */
   relationMarkers: Record<string, Record<string, DomainFieldCore>>;
+  /** Association pairs that need a junction table (deduplicated). */
+  associations: { a: string; b: string }[];
+  /** RBAC rules pulled from each attribute's inline `access.rbac`, keyed "Domain.attribute". */
+  rbacRules: Record<string, RBACFieldRule>;
+  /** ABAC rules pulled from each attribute's inline `access.abac`, keyed "Domain.attribute". */
+  abacRules: Record<string, ABACFieldRule>;
+  /** Domain-level access from each domain's `access` block, keyed by PascalCase domain name. */
+  domainAccess: Record<string, { rbac?: Record<string, string[]>; abac?: Record<string, any>[] }>;
+  /** Projects (and their modules) declared by a `projects` structure — empty for a flat import. */
+  projects: ImportedProject[];
+  /** PascalCase domain name → the project / module NAMES it was nested under in the JSON. */
+  domainScopes: Record<string, { project?: string; module?: string }>;
+  totalProjects: number;
+  totalModules: number;
   totalDomains: number;
   totalAttributes: number;
   skippedSynthesized: number;
   warnings: ImportedAttributeWarning[];
 }
 
+type ImportResultScopes = Record<string, { project?: string; module?: string }>;
+export interface ImportedModule  { name: string; description?: string }
+export interface ImportedProject { name: string; description?: string; modules: ImportedModule[] }
+
 function mapImportedType(rawType: string): FieldType {
-  if (rawType === "domain model") return "relation" as FieldType; // see note in types.ts — "relation" isn't in the FieldType union but is used everywhere as a de-facto field type
+  if (rawType === "domain model" || rawType === "domain_model") return "relation" as FieldType; // see note in types.ts — "relation" isn't in the FieldType union but is used everywhere as a de-facto field type
   if (rawType === "text") return "string";
   return rawType as FieldType;
 }
 
-/** Accepts either `{ domain_models: [...] }` or a bare `[...]` array. */
-function extractDomainModelsArray(parsed: any): any[] {
-  if (Array.isArray(parsed)) return parsed;
-  if (parsed && Array.isArray(parsed.domain_models)) return parsed.domain_models;
-  throw new Error(
-    'Expected an object with a "domain_models" array (or a bare array of domain models).'
-  );
+const RBAC_KEYS = ["visible", "read", "write", "disabled"] as const;
+const ABAC_KEYS = ["visible", "read", "write", "disabled"] as const;
+
+/** Validates an inline `access.rbac` block: each key must be an array of role strings. */
+function parseRbacBlock(raw: any, warn: (msg: string) => void): RBACFieldRule | null {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) { warn("access.rbac must be an object — ignored."); return null; }
+  const rule: RBACFieldRule = {};
+  for (const [k, v] of Object.entries(raw)) {
+    if (!(RBAC_KEYS as readonly string[]).includes(k)) { warn(`Unknown access.rbac key "${k}" — ignored.`); continue; }
+    if (!Array.isArray(v) || v.some((r) => typeof r !== "string")) { warn(`access.rbac.${k} must be an array of role names — ignored.`); continue; }
+    (rule as any)[k] = v;
+  }
+  return Object.keys(rule).length ? rule : null;
+}
+
+/** Validates an inline `access.abac` block: each key is an expression string or a boolean. */
+function parseAbacBlock(raw: any, warn: (msg: string) => void): ABACFieldRule | null {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) { warn("access.abac must be an object — ignored."); return null; }
+  const rule: ABACFieldRule = {};
+  for (const [k, v] of Object.entries(raw)) {
+    if (!(ABAC_KEYS as readonly string[]).includes(k)) { warn(`Unknown access.abac key "${k}" — ignored.`); continue; }
+    if (typeof v !== "string" && typeof v !== "boolean") { warn(`access.abac.${k} must be an expression string or boolean — ignored.`); continue; }
+    (rule as any)[k] = v;
+  }
+  return Object.keys(rule).length ? rule : null;
+}
+
+interface ExtractedStructure {
+  rawDomains: any[];
+  /** Parallel to rawDomains: the project / module names each one was nested under. */
+  scopes: { project?: string; module?: string }[];
+  projects: ImportedProject[];
+}
+
+const cleanStr = (v: unknown) => (typeof v === "string" ? v.trim() : "");
+
+/**
+ * Accepts `{ projects: [...] }` (Project → Module → Domain models), the flat
+ * `{ domain_models: [...] }`, or a bare `[...]` array — and flattens all of
+ * them to one domain list plus the project / module each domain sat under.
+ */
+function extractStructure(parsed: any): ExtractedStructure {
+  if (Array.isArray(parsed)) return { rawDomains: parsed, scopes: parsed.map(() => ({})), projects: [] };
+
+  const hasProjects = parsed && Array.isArray(parsed.projects);
+  const hasFlat     = parsed && Array.isArray(parsed.domain_models);
+  if (!hasProjects && !hasFlat) {
+    throw new Error(
+      'Expected an object with a "projects" array (Project → Module → domain_models) or a "domain_models" array (or a bare array of domain models).'
+    );
+  }
+
+  const rawDomains: any[] = [];
+  const scopes: ExtractedStructure["scopes"] = [];
+  const projects: ImportedProject[] = [];
+  const add = (list: any, scope: { project?: string; module?: string }) => {
+    if (!Array.isArray(list)) return;
+    for (const d of list) { rawDomains.push(d); scopes.push(scope); }
+  };
+
+  if (hasProjects) {
+    parsed.projects.forEach((rp: any, pi: number) => {
+      const pName = cleanStr(rp?.name);
+      if (!pName) throw new Error(`Project at index ${pi} is missing a "name".`);
+      let project = projects.find((p) => p.name === pName);
+      if (!project) {
+        project = { name: pName, description: cleanStr(rp.description) || undefined, modules: [] };
+        projects.push(project);
+      }
+      add(rp.domain_models, { project: pName });
+      if (rp.modules !== undefined && !Array.isArray(rp.modules)) throw new Error(`Project "${pName}": "modules" must be an array.`);
+      (rp.modules ?? []).forEach((rm: any, mi: number) => {
+        const mName = cleanStr(rm?.name);
+        if (!mName) throw new Error(`Project "${pName}": module at index ${mi} is missing a "name".`);
+        if (!project!.modules.some((m) => m.name === mName)) {
+          project!.modules.push({ name: mName, description: cleanStr(rm.description) || undefined });
+        }
+        add(rm.domain_models, { project: pName, module: mName });
+      });
+    });
+  }
+  // Domain models in no project (top level).
+  if (hasFlat) add(parsed.domain_models, {});
+
+  return { rawDomains, scopes, projects };
+}
+
+type RelationRole = "association" | "parent" | "child" | "synthesized";
+/** `relatedAll` is set only when an association's linked_to lists several domains. */
+interface NormalizedRelation { role: RelationRole; related: string; relatedAll?: string[] }
+
+/**
+ * Normalizes every supported related_domain_model shape into a role:
+ *
+ *  Current shape:
+ *    { linked_to, relationship_type: "association" | "integral", owned_by }
+ *      association                          → association with linked_to
+ *      integral, owned_by === this domain   → "parent": this domain owns linked_to
+ *      integral, owned_by === linked_to     → "child":  this field is the FK to its owner
+ *      integral, owned_by missing / "NA"    → decided by cardinality (many = parent)
+ *
+ *  Legacy export shape:
+ *    { kind: "association", linked_with } | { kind: "integral", part_of } | { kind: "integral", contains }
+ */
+function normalizeRelation(domainName: string, attr: any, relation: any): NormalizedRelation | null {
+  if (!relation || typeof relation !== "object") return null;
+
+  // ── legacy ──
+  if (relation.kind) {
+    if (relation.kind === "association" && relation.linked_with)
+      return { role: "association", related: toPascalCase(relation.linked_with) };
+    if (relation.kind === "integral" && relation.part_of)
+      return { role: "child", related: toPascalCase(relation.part_of) };
+    if (relation.kind === "integral" && relation.contains)
+      return { role: "synthesized", related: toPascalCase(relation.contains) };
+    return null;
+  }
+
+  // ── current ──
+  // An association may list several domains: linked_to: ["A", "B", ...].
+  if (Array.isArray(relation.linked_to)) {
+    const all = Array.from(new Set(
+      relation.linked_to
+        .filter((x: any) => typeof x === "string" && x.trim())
+        .map((x: string) => toPascalCase(x.trim())),
+    )) as string[];
+    if (all.length === 0) return null;
+    if (String(relation.relationship_type ?? "").toLowerCase() !== "association") return null;
+    return { role: "association", related: all[0], ...(all.length > 1 ? { relatedAll: all } : {}) };
+  }
+  const linkedTo = typeof relation.linked_to === "string" ? relation.linked_to.trim() : "";
+  if (!linkedTo) return null;
+  const related = toPascalCase(linkedTo);
+  const type = String(relation.relationship_type ?? "").toLowerCase();
+
+  if (type === "association") return { role: "association", related };
+  if (type === "integral") {
+    const ownerRaw = typeof relation.owned_by === "string" ? relation.owned_by.trim() : "";
+    const owner = ownerRaw && ownerRaw.toUpperCase() !== "NA" ? toPascalCase(ownerRaw) : "";
+    if (owner && owner === domainName && related !== domainName) return { role: "parent", related };
+    if (owner && owner === related && owner !== domainName) return { role: "child", related };
+    return { role: attr?.cardinality === "many" ? "parent" : "child", related };
+  }
+  return null;
+}
+
+/** Removes trailing commas before } or ] (outside of string literals). */
+function stripTrailingCommas(raw: string): string {
+  let out = "";
+  let inStr = false;
+  for (let i = 0; i < raw.length; i++) {
+    const c = raw[i];
+    if (inStr) {
+      out += c;
+      if (c === "\\") { out += raw[++i] ?? ""; }
+      else if (c === '"') inStr = false;
+      continue;
+    }
+    if (c === '"') { inStr = true; out += c; continue; }
+    if (c === ",") {
+      let j = i + 1;
+      while (j < raw.length && /\s/.test(raw[j])) j++;
+      if (raw[j] === "}" || raw[j] === "]") continue;
+    }
+    out += c;
+  }
+  return out;
 }
 
 /**
@@ -77,19 +276,34 @@ export function parseDomainModelImport(raw: string): DomainModelImportResult {
   try {
     parsed = JSON.parse(raw);
   } catch (err: any) {
-    throw new Error(`Invalid JSON: ${err?.message ?? String(err)}`);
+    try {
+      // Be lenient with trailing commas, a common hand-editing slip.
+      parsed = JSON.parse(stripTrailingCommas(raw));
+    } catch {
+      throw new Error(`Invalid JSON: ${err?.message ?? String(err)}`);
+    }
   }
 
-  const rawDomains = extractDomainModelsArray(parsed);
-  if (rawDomains.length === 0) {
+  const { rawDomains, scopes, projects } = extractStructure(parsed);
+  if (rawDomains.length === 0 && projects.length === 0) {
     throw new Error("No domain models found in the JSON.");
   }
+  const domainScopes: ImportResultScopes = {};
 
   const domains: DomainDefinition[] = [];
   const relationMarkers: Record<string, Record<string, DomainFieldCore>> = {};
   const warnings: ImportedAttributeWarning[] = [];
+  const rbacRules: Record<string, RBACFieldRule> = {};
+  const abacRules: Record<string, ABACFieldRule> = {};
+  const domainAccess: DomainModelImportResult["domainAccess"] = {};
+  // ABAC rules found under individual attributes: domain → [{ field, rule }]. Merged into
+  // domainAccess[domain].abac (as one rule with a `fields` list) just before returning.
+  const attrAbac: Record<string, { field: string; rule: Record<string, any> }[]> = {};
   let totalAttributes = 0;
   let skippedSynthesized = 0;
+  const parentLinks: { parent: string; child: string }[] = [];
+  const childFkDomains = new Set<string>(); // "Child->Parent" pairs that already have an explicit FK
+  const associations: { a: string; b: string }[] = [];
 
   rawDomains.forEach((rawDomain: any, di: number) => {
     const rawDomainName = typeof rawDomain?.name === "string" ? rawDomain.name.trim() : "";
@@ -99,8 +313,33 @@ export function parseDomainModelImport(raw: string): DomainModelImportResult {
     // Domain model names are stored PascalCase regardless of how they
     // arrive in the imported JSON.
     const domainName = toPascalCase(rawDomainName);
+    if (scopes[di]?.project) domainScopes[domainName] = scopes[di];
     if (domainName !== rawDomainName) {
       warnings.push({ domain: domainName, attribute: "", message: `Domain name "${rawDomainName}" reformatted to PascalCase ("${domainName}") on import.` });
+    }
+
+    // Domain-level access (RBAC role → actions, ABAC rule list).
+    if (rawDomain.access && typeof rawDomain.access === "object") {
+      const dWarn = (message: string) => warnings.push({ domain: domainName, attribute: "", message });
+      const acc: { rbac?: Record<string, string[]>; abac?: Record<string, any>[] } = {};
+      const rawRbac = rawDomain.access.rbac;
+      if (rawRbac !== undefined) {
+        if (!rawRbac || typeof rawRbac !== "object" || Array.isArray(rawRbac)) dWarn("access.rbac must be an object of role → actions — ignored.");
+        else {
+          const rbac: Record<string, string[]> = {};
+          for (const [role, actions] of Object.entries(rawRbac)) {
+            if (!Array.isArray(actions) || actions.some((a) => typeof a !== "string")) { dWarn(`access.rbac["${role}"] must be an array of action names — ignored.`); continue; }
+            rbac[role] = actions as string[];
+          }
+          if (Object.keys(rbac).length) acc.rbac = rbac;
+        }
+      }
+      const rawAbac = rawDomain.access.abac;
+      if (rawAbac !== undefined) {
+        if (!Array.isArray(rawAbac) || rawAbac.some((r) => !r || typeof r !== "object")) dWarn("access.abac must be an array of rule objects — ignored.");
+        else if (rawAbac.length) acc.abac = rawAbac;
+      }
+      if (acc.rbac || acc.abac) domainAccess[domainName] = acc;
     }
 
     const rawAttributes: any[] = Array.isArray(rawDomain.attributes) ? rawDomain.attributes : [];
@@ -119,11 +358,11 @@ export function parseDomainModelImport(raw: string): DomainModelImportResult {
         warnings.push({ domain: domainName, attribute: attributeId, message: `Attribute "${rawAttributeId}" reformatted to camelCase ("${attributeId}") on import.` });
       }
 
-      // Skip synthesized reverse attributes (the parent-side "contains" view
-      // of another domain's integral FK) — they have no real column and are
-      // re-derived automatically once the child domain's real FK is imported.
-      const relation = attr.related_domain_model;
-      if (relation && relation.kind === "integral" && "contains" in relation) {
+      // Legacy "contains" attributes (synthesized reverse side) are skipped —
+      // they have no real column and are re-derived from the child's FK.
+      const rawRelation = attr.related_domain_model;
+      const relation = normalizeRelation(domainName, attr, rawRelation);
+      if (relation?.role === "synthesized") {
         skippedSynthesized++;
         continue;
       }
@@ -139,15 +378,17 @@ export function parseDomainModelImport(raw: string): DomainModelImportResult {
       }
 
       if (relation) {
-        if (relation.kind === "association" && relation.linked_with) {
-          field.relatedDomain = toPascalCase(relation.linked_with);
-          field.relationKind = "association";
-        } else if (relation.kind === "integral" && relation.part_of) {
-          field.relatedDomain = toPascalCase(relation.part_of);
-          field.relationKind = "integral";
-        } else {
-          warnings.push({ domain: domainName, attribute: attributeId, message: `Unrecognized related_domain_model shape — relation dropped: ${JSON.stringify(relation)}` });
+        field.type = "relation" as FieldType;
+        field.relatedDomain = relation.related;
+        if (relation.relatedAll) field.relatedDomains = relation.relatedAll;
+        field.relationKind = relation.role === "association" ? "association" : "integral";
+        if (relation.role === "parent") parentLinks.push({ parent: domainName, child: relation.related });
+        if (relation.role === "child") childFkDomains.add(`${domainName}->${relation.related}`);
+        if (relation.role === "association") {
+          for (const rel of relation.relatedAll ?? [relation.related]) associations.push({ a: domainName, b: rel });
         }
+      } else if (rawRelation) {
+        warnings.push({ domain: domainName, attribute: attributeId, message: `Unrecognized related_domain_model shape — relation dropped: ${JSON.stringify(rawRelation)}` });
       }
 
       if (Array.isArray(attr.validations) && attr.validations.length > 0) {
@@ -159,6 +400,34 @@ export function parseDomainModelImport(raw: string): DomainModelImportResult {
       }
 
       fields[attributeId] = field;
+
+      // Inline field-level access control → "Domain.attribute"-keyed rules,
+      // the same shape the rbac / abac configs and extra.rbacRules use.
+      if (attr.access && typeof attr.access === "object") {
+        const warn = (message: string) => warnings.push({ domain: domainName, attribute: attributeId, message });
+        const path = `${domainName}.${attributeId}`;
+        if (attr.access.rbac !== undefined) {
+          const rbac = parseRbacBlock(attr.access.rbac, warn);
+          if (rbac) rbacRules[path] = rbac;
+        }
+        // `abac` as an ARRAY = ABAC rules targeting this attribute (backend rules).
+        // `abac_expression` (or, from older exports, `abac` as an OBJECT) = field-level expressions.
+        const rawAbac = attr.access.abac;
+        if (Array.isArray(rawAbac)) {
+          for (const rule of rawAbac) {
+            if (!rule || typeof rule !== "object") { warn("access.abac entries must be rule objects — ignored."); continue; }
+            const { fields: _ignored, ...body } = rule as any;
+            (attrAbac[domainName] ??= []).push({ field: attributeId, rule: body });
+          }
+        } else if (rawAbac !== undefined) {
+          const abac = parseAbacBlock(rawAbac, warn);
+          if (abac) abacRules[path] = abac;
+        }
+        if (attr.access.abac_expression !== undefined) {
+          const abac = parseAbacBlock(attr.access.abac_expression, warn);
+          if (abac) abacRules[path] = abac;
+        }
+      }
 
       // Relation fields never become real backend columns (same rule the
       // rest of the app follows — see handleAddFieldToExisting /
@@ -173,9 +442,73 @@ export function parseDomainModelImport(raw: string): DomainModelImportResult {
     domains.push({ name: domainName, fields });
   });
 
+  // ── Second pass: wire relations across domains ────────────────────────────
+  const byName = new Map(domains.map((d) => [d.name, d]));
+
+  // Every relation target must exist in this import (or already in the app).
+  for (const d of domains) {
+    for (const [fname, f] of Object.entries(d.fields)) {
+      if (f.relatedDomain && !byName.has(f.relatedDomain)) {
+        warnings.push({ domain: d.name, attribute: fname, message: `Links to "${f.relatedDomain}", which isn't in this JSON — it must already exist in the app.` });
+      }
+    }
+  }
+
+  // Integral (composition): the owning side's attribute implies a real FK on
+  // the child. If the JSON didn't declare that FK explicitly, add it.
+  for (const { parent, child } of parentLinks) {
+    const childDomain = byName.get(child);
+    if (!childDomain || childFkDomains.has(`${child}->${parent}`)) continue;
+    const fkName = `${parent}Id`;
+    if (childDomain.fields[fkName]) continue;
+    const fk: DomainFieldCore = { type: "relation" as FieldType, relatedDomain: parent, relationKind: "integral" };
+    childDomain.fields[fkName] = fk;
+    relationMarkers[child] = { ...(relationMarkers[child] ?? {}), [fkName]: fk };
+    childFkDomains.add(`${child}->${parent}`);
+    totalAttributes++;
+    warnings.push({ domain: child, attribute: fkName, message: `Added foreign key to "${parent}" (implied by ${parent}'s integral link to ${child}).` });
+  }
+
+  // Associations need a junction table; dedupe unordered pairs.
+  const seenPairs = new Set<string>();
+  const uniqueAssociations = associations.filter(({ a, b }) => {
+    const key = [a, b].sort().join("__");
+    if (seenPairs.has(key)) return false;
+    seenPairs.add(key);
+    return true;
+  });
+
+
+  // Fold per-attribute ABAC rules into each domain's rule list. Identical rules
+  // (same body) collapse into one rule whose `fields` lists every attribute it was found on;
+  // a rule already covering ALL fields (empty `fields`) absorbs identical per-attribute copies.
+  for (const [domain, entries] of Object.entries(attrAbac)) {
+    const acc = (domainAccess[domain] ??= {});
+    const rules: Record<string, any>[] = (acc.abac ??= []);
+    for (const { field, rule } of entries) {
+      const stable = (o: Record<string, any>) => JSON.stringify(Object.keys(o).sort().map((k) => [k, o[k]]));
+      const key = stable(rule);
+      const sameBody = (r: Record<string, any>) => {
+        const { fields: _f, ...body } = r;
+        return stable(body) === key;
+      };
+      const existing = rules.find(sameBody);
+      if (!existing) rules.push({ ...rule, fields: [field] });
+      else if (Array.isArray(existing.fields) && existing.fields.length > 0 && !existing.fields.includes(field)) existing.fields.push(field);
+    }
+  }
+
   return {
     domains,
     relationMarkers,
+    associations: uniqueAssociations,
+    rbacRules,
+    abacRules,
+    domainAccess,
+    projects,
+    domainScopes,
+    totalProjects: projects.length,
+    totalModules: projects.reduce((n, p) => n + p.modules.length, 0),
     totalDomains: domains.length,
     totalAttributes,
     skippedSynthesized,

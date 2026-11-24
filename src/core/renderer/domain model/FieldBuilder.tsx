@@ -1,4 +1,4 @@
-import React, { useState, useRef } from "react";
+import React, { useState, useRef, useEffect } from "react";
 import AddCircleOutlinedIcon   from "@mui/icons-material/AddCircleOutlined";
 import CheckCircleOutlinedIcon from "@mui/icons-material/CheckCircleOutlined";
 import AddIcon                 from "@mui/icons-material/Add";
@@ -11,6 +11,7 @@ import type { QuickCreateField } from "./DomainPickers";
 import { ValidationRefPicker } from "./ValidationRefPicker";
 import { NewRegistryRuleForm } from "./NewRegistryRuleForm";
 import { toPascalCase, toCamelCase } from "./helpers";
+import { displayDomainName } from "../../api/datastoreApi";
 
 export interface FieldBuilderProps {
   submitLabel:    string;
@@ -48,6 +49,10 @@ export interface FieldBuilderProps {
   compact?: boolean;
 }
 
+/** The Integral / Association picker is hidden for now: every linked domain
+ *  is saved as an "association". Flip to true to bring the picker back. */
+const SHOW_RELATION_KIND_SELECTOR = false;
+
 export function FieldBuilder({
   submitLabel, initialName = "", initialDraft, onSubmit, onCancel,
   showAllLayers = true, showLabelOnly = false, registry = {}, domainNames = [],
@@ -55,13 +60,35 @@ export function FieldBuilder({
   onRedirectToCreate, compact = false,
 }: FieldBuilderProps) {
 const [fieldName, setFieldName] = useState(initialName);
+  // Extra existing domains linked alongside draft.relatedDomain (adding a
+  // new field only — editing a field keeps its single relation).
+  const [extraDomains, setExtraDomains] = useState<string[]>([]);
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const pickerRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!pickerOpen) return;
+    const onDown = (e: MouseEvent) => {
+      if (pickerRef.current && !pickerRef.current.contains(e.target as Node)) setPickerOpen(false);
+    };
+    document.addEventListener("mousedown", onDown);
+    return () => document.removeEventListener("mousedown", onDown);
+  }, [pickerOpen]);
   const [enFieldName, setEnFieldName] = useState(initialName);
+  // Business label ("First Name"). Follows what is typed in the name box
+  // until the user edits it by hand; when editing an existing field the
+  // saved label is never overwritten by retyping the name.
+  const [labelTouched, setLabelTouched] = useState(!!initialName);
   const [draft,     setDraft]     = useState<FieldDraft>(initialDraft ? { ...initialDraft } : { ...BLANK_DRAFT });
   const [draftVal,  setDraftVal]  = useState<DraftValidation>({ type: "required", value: "", message: "" });
   const [labelLang, setLabelLang] = useState<"en" | "ta" | "ar">("en");
   const isPartOfRef = useRef<boolean | "fk">(initialDraft ? initialDraft.isPartOf : true);
 
-
+  // ── Owns / Uses (metadata only) ──────────────────────────────────────────
+  // This is just a label stored on the attribute (draft.linkMode) so other
+  // apps can read it. It does NOT change the table structure: no FK column,
+  // no junction table, no change to isPartOf / relationKind. Defaults to
+  // "uses" until the user picks one.
+  const linkMode: "owns" | "uses" = draft.linkMode ?? "uses";
 
   function set<K extends keyof FieldDraft>(key: K, val: FieldDraft[K]) {
     setDraft((d) => ({ ...d, [key]: val }));
@@ -96,11 +123,14 @@ const [fieldName, setFieldName] = useState(initialName);
     if (!fieldName.trim()) return null;
 
     let finalDraft = { ...draft, isPartOf: isPartOfRef.current };
-    if (showLabelOnly) {
-      finalDraft = { ...finalDraft, labels: { ...finalDraft.labels, [labelLang]: fieldName } };
+    // No label typed → keep the name exactly as the user typed it (e.g.
+    // "First Name") instead of falling back to the camelCase storage name.
+    if (!finalDraft.labels.en?.trim()) {
+      finalDraft = { ...finalDraft, labels: { ...finalDraft.labels, en: fieldName.trim() } };
     }
-
-    const rawTechnicalName = showLabelOnly ? (enFieldName || finalDraft.labels.en || fieldName).trim() : fieldName.trim();
+    // The storage name always comes from the "Field name" box, never from the
+    // label — the label is a separate business name (same as the domain model).
+    const rawTechnicalName = fieldName.trim();
     if (!rawTechnicalName) return null;
     // Attribute names are stored camelCase, however they were typed.
     const technicalName = toCamelCase(rawTechnicalName);
@@ -109,72 +139,162 @@ const [fieldName, setFieldName] = useState(initialName);
       finalDraft = {
         ...finalDraft,
         // "__new__:..." sentinels resolve (and PascalCase) inside
-        // resolveRelatedDomain; plain picks are an existing domain name
-        // already stored correctly, so PascalCase is a no-op there.
+        // resolveRelatedDomain. A pick of an EXISTING domain must keep its exact
+        // storage key: keys like "User__11" are NOT PascalCase-stable
+        // (toPascalCase turns them into "User11", a domain that doesn't exist,
+        // which then got auto-created). Only a typed, not-yet-existing name is
+        // normalised.
         relatedDomain: finalDraft.relatedDomain.startsWith("__new__:")
           ? resolveRelatedDomain(finalDraft.relatedDomain)
-          : toPascalCase(finalDraft.relatedDomain),
+          : domainNames.includes(finalDraft.relatedDomain)
+            ? finalDraft.relatedDomain
+            : toPascalCase(finalDraft.relatedDomain),
         isPartOf: isPartOfRef.current,
+        // Editing keeps an existing multi-domain list only while the primary
+        // domain is unchanged; adding builds the list in submit() instead.
+        relatedDomains:
+          initialDraft?.relatedDomains && initialDraft.relatedDomains[0] === finalDraft.relatedDomain
+            ? initialDraft.relatedDomains
+            : undefined,
+        // Every linked domain is an association while the picker is hidden.
+        // Editing a field that is already integral keeps its kind, so
+        // existing data isn't silently converted.
+        relationKind: SHOW_RELATION_KIND_SELECTOR || initialDraft?.relationKind === "integral"
+          ? finalDraft.relationKind
+          : "association",
+        // Metadata only — see linkMode above.
+        linkMode,
       };
     }
 
     return { technicalName, finalDraft };
   }
 
+  // ── Multi-domain linking ─────────────────────────────────────────────────
+  // Only offered when ADDING a relation field to an EXISTING target (a
+  // not-yet-created domain still goes through the single "Create … domain"
+  // flow). Derived on every render from domainNames, so a stale pick (domain
+  // deleted, or later chosen as the primary one) can never leak through.
+  const canMultiLink =
+    !initialName &&
+    draft.type === "relation" &&
+    !!draft.relatedDomain &&
+    domainNames.includes(draft.relatedDomain) &&
+    draft.isPartOf !== "fk";
+  const linkedExtras = canMultiLink
+    ? Array.from(new Set(extraDomains)).filter(
+        (d) => d !== draft.relatedDomain && d !== parentDomainName && !displayDomainName(d).includes("_") && domainNames.includes(d),
+      )
+    : [];
+  const isMulti = linkedExtras.length > 0;
+  const allLinked = isMulti ? [draft.relatedDomain, ...linkedExtras] : [];
+
+  // Checkbox picker (adding a field only). The first selected domain is
+  // draft.relatedDomain; the rest live in extraDomains.
+  // Junction tables (named "A_B" — domain names themselves never contain an
+  // underscore, they're stored PascalCase) can't be a relation target.
+  // NOTE: the storage KEY of a domain can end in "__<projectId>" (e.g. the
+  // IDAM "User" model is stored as "User__5" when another project already
+  // owns the key "User"), so the check must run on the visible name.
+  const pickableDomains = domainNames.filter((d) => d !== parentDomainName && !displayDomainName(d).includes("_"));
+  // Two domains can share a visible name (different projects, or a leftover
+  // copy) while having different storage keys — show the key for those so
+  // they can be told apart.
+  const domainLabel = (d: string): string => {
+    const vis = displayDomainName(d);
+    const clash = domainNames.filter((x) => displayDomainName(x) === vis).length > 1;
+    return clash ? `${vis} (${d})` : vis;
+  };
+  const selectedDomains = canMultiLink ? [draft.relatedDomain, ...linkedExtras] : [];
+  const pendingNewDomain = draft.relatedDomain !== "" && !domainNames.includes(draft.relatedDomain);
+
+  function toggleDomain(d: string) {
+    if (selectedDomains.includes(d)) {
+      const rest = selectedDomains.filter((x) => x !== d);
+      if (rest.length === 0) { set("relatedDomain", ""); setExtraDomains([]); }
+      else { set("relatedDomain", rest[0]); setExtraDomains(rest.slice(1)); }
+      return;
+    }
+    // Association is the default the moment any domain is picked.
+    isPartOfRef.current = false;
+    set("isPartOf", false);
+    if (selectedDomains.length === 0) { set("relatedDomain", d); setExtraDomains([]); }
+    else setExtraDomains([...selectedDomains.slice(1), d]);
+  }
+
+  function pickNewDomain() {
+    const suggestion = fieldName.trim() && fieldName.trim() !== parentDomainName ? fieldName.trim() : "";
+    set("relatedDomain", suggestion);
+    isPartOfRef.current = false;
+    set("isPartOf", false);
+    setExtraDomains([]);
+    setPickerOpen(false);
+  }
+
+  function resetAfterSubmit() {
+    if (initialName) return;
+    setFieldName("");
+    setEnFieldName("");
+    setLabelTouched(false);
+    setLabelLang("en");
+    setDraft({ ...BLANK_DRAFT });
+    setExtraDomains([]);
+  }
+
   function submit() {
     const built = buildFinalDraft();
     if (!built) return;
-    onSubmit(built.technicalName, built.finalDraft);
-    if (!initialName) {
-      setFieldName("");
-      setEnFieldName("");
-      setLabelLang("en");
-      setDraft({ ...BLANK_DRAFT });
-    }
+    // Several domains → still ONE field (named as typed). It carries the full
+    // list; the caller creates a junction table for each domain in it.
+    const finalDraft = isMulti
+      ? { ...built.finalDraft, relatedDomain: allLinked[0], relatedDomains: allLinked }
+      : built.finalDraft;
+    onSubmit(built.technicalName, finalDraft);
+    resetAfterSubmit();
   }
 
-  // Shared by both the "existing domain" and "create new domain" rows
-  // below — two-way choice for the relationship's physical shape.
-  // "References" (this domain gets a real column pointing at the
-  // related domain, named exactly as typed) is the default the moment a
-  // domain is picked — no button needed for it, see the info chip below.
-  // These two buttons let you override that default:
-  //  - Integral:     the RELATED domain gets a real `${this}Id` column
-  //                   pointing back at this one (e.g. "designation only
-  //                   ever exists as part of grade" → designation gets
-  //                   gradeId). Safe for an already-existing target —
-  //                   merged into its existing fields, never replacing
-  //                   them.
-  //  - Association:  a junction table is created; neither domain gets a
-  //                   direct column.
-  const relationShapeSelector = (
-    <div style={{
-      display:"inline-flex", alignItems:"center", gap:2,
-      border:"1px solid var(--color-border-secondary)", borderRadius:"var(--border-radius-md)",
-      padding:2, background:"var(--color-background-primary)",
-    }}>
-      <button type="button"
-        onClick={() => { isPartOfRef.current = true; set("isPartOf", true); set("relationKind", "integral"); }}
-        title={`${draft.relatedDomain || "The related domain"} stores a reference back to ${parentDomainName || "this domain"} — e.g. it only ever exists as part of it`}
+  // Owns / Uses radio — a label only. Changing it never touches the table
+  // structure; it is saved on the attribute for other apps to read.
+  const radioName = `si-link-mode-${parentDomainName}-${initialName}`;
+  const linkModeOption = (value: "owns" | "uses", text: string) => {
+    const active = linkMode === value;
+    return (
+      <label
         style={{
-          fontSize:11, fontWeight:600, padding:"5px 9px", borderRadius:"calc(var(--border-radius-md) - 2px)",
-          border:"none", cursor:"pointer",
-          background: draft.isPartOf !== "fk" && draft.relationKind === "integral" ? "#4338ca" : "transparent",
-          color: draft.isPartOf !== "fk" && draft.relationKind === "integral" ? "#fff" : "var(--color-text-secondary)",
-        }}>
-        Integral
-      </button>
-      <button type="button"
-        onClick={() => { isPartOfRef.current = true; set("isPartOf", true); set("relationKind", "association"); }}
-        title="Many-to-many — a junction table is created; neither domain gets a direct column"
-        style={{
-          fontSize:11, fontWeight:600, padding:"5px 9px", borderRadius:"calc(var(--border-radius-md) - 2px)",
-          border:"none", cursor:"pointer",
-          background: draft.isPartOf !== "fk" && draft.relationKind === "association" ? "#4338ca" : "transparent",
-          color: draft.isPartOf !== "fk" && draft.relationKind === "association" ? "#fff" : "var(--color-text-secondary)",
-        }}>
-        Association
-      </button>
+          display: "inline-flex", alignItems: "center", gap: 8,
+          height: 36, padding: "0 14px", cursor: "pointer",
+          fontSize: 13, fontWeight: active ? 600 : 500,
+          color: active ? "var(--color-text-primary)" : "var(--color-text-secondary)",
+          background: active ? "rgba(99,102,241,0.16)" : "var(--color-background-primary)",
+          border: `1px solid ${active ? "#6366f1" : "var(--color-border-secondary)"}`,
+          borderRadius: "var(--border-radius-md)",
+          transition: "background 120ms, border-color 120ms",
+        }}
+      >
+        <input
+          type="radio"
+          name={radioName}
+          checked={active}
+          onChange={() => set("linkMode", value)}
+          style={{ width: 15, height: 15, margin: 0, cursor: "pointer", accentColor: "#6366f1", flexShrink: 0 }}
+        />
+        {text}
+      </label>
+    );
+  };
+
+  const linkModeRadio = (
+    <div
+      className="si-link-mode"
+      role="radiogroup"
+      aria-label="Owns or uses"
+      style={{ display: "flex", flexDirection: "column", gap: 6, margin: "14px 0 16px" }}
+    >
+      <span className="si-form-label-text">Owns / Uses</span>
+      <div style={{ display: "flex", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
+        {linkModeOption("owns", "Owns")}
+        {linkModeOption("uses", "Uses")}
+      </div>
     </div>
   );
 
@@ -183,7 +303,7 @@ const [fieldName, setFieldName] = useState(initialName);
       {/* Layer 1 */}
       <div className="si-layer-section si-layer-section--domain">
         <div className="si-layer-section-label">Layer 1 — Domain Model</div>
-        <div className="si-form-row">
+        <div className="si-form-row" style={{ display: "flex", flexWrap: "wrap", alignItems: "flex-end", columnGap: 12, rowGap: 10 }}>
           <label className="si-form-label">
             <span className="si-form-label-text">Field name (EN) * {fieldName.trim() && <span className="si-hint">saved as {toCamelCase(fieldName)}</span>}</span>
             <input
@@ -193,16 +313,25 @@ const [fieldName, setFieldName] = useState(initialName);
                 const val = e.target.value;
                 setFieldName(val);
                 setEnFieldName(val);
-                if (showLabelOnly) setLabelForLang("en", val);
+                if (!labelTouched) setLabelForLang("en", val);
                 // Field name no longer auto-drives relatedDomain — which
                 // domain to point at is now an explicit choice via the
                 // "Select Domain" dropdown below, decoupled from whatever
                 // this field happens to be named.
               }}
-              placeholder="e.g. name"
+              placeholder="e.g. First Name"
             />
           </label>
-        
+          <label className="si-form-label">
+            <span className="si-form-label-text">Label (business name)</span>
+            <input
+              className="si-form-input"
+              value={draft.labels.en ?? ""}
+              onChange={(e) => { setLabelTouched(true); setLabelForLang("en", e.target.value); }}
+              placeholder="e.g. First Name"
+            />
+          </label>
+
            <label className="si-form-label">
             <span className="si-form-label-text">Type</span>
            <select
@@ -214,6 +343,7 @@ const [fieldName, setFieldName] = useState(initialName);
                 if (selectedType !== "relation") {
                   set("relatedDomain", "");
                   set("listDomain", "");
+                  setExtraDomains([]);
                 } else if (!draft.relatedDomain) {
                   // Fresh switch to relation, nothing chosen yet — leave
                   // relatedDomain blank so the dropdown starts on
@@ -227,7 +357,7 @@ const [fieldName, setFieldName] = useState(initialName);
               ))}
             </select>
           </label>
-          <label className="si-form-label">
+          <label className="si-form-label" style={{ flex: "0 0 auto", width: "auto" }}>
               <span className="si-form-label-text">Cardinality</span>
               <label style={{ display: "flex", alignItems: "center", gap: 8, height: 36, padding: "0 10px", border: "1px solid var(--color-border-secondary)", borderRadius: "var(--border-radius-md)", cursor: "pointer", background: "var(--color-background-primary)" }}>
                 <input
@@ -240,8 +370,42 @@ const [fieldName, setFieldName] = useState(initialName);
               </label>
             </label>
 
-          {draft.type === "relation" && (
-            <label className="si-form-label">
+          {draft.type === "relation" && !initialName && (
+            <div className="si-form-label" ref={pickerRef} style={{ position: "relative", flex: "0 0 auto", width: "auto" }}>
+              <span className="si-form-label-text">
+                Select Domain{selectedDomains.length > 1 ? ` (${selectedDomains.length} selected)` : ""}
+              </span>
+              <button
+                type="button"
+                className="si-form-select"
+                onClick={() => setPickerOpen((o) => !o)}
+                style={{ textAlign: "left", cursor: "pointer", minWidth: 190, maxWidth: 280, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+              >
+                {selectedDomains.length > 0
+                  ? selectedDomains.map((d) => domainLabel(d)).join(", ")
+                  : pendingNewDomain ? `New: ${draft.relatedDomain}` : "-- Select domain(s) --"}
+              </button>
+              {pickerOpen && (
+                <div className="si-multi-menu">
+                  {pickableDomains.length === 0 && (
+                    <div className="si-multi-empty">No other domains yet</div>
+                  )}
+                  {pickableDomains.map((d) => (
+                    <label key={d} className="si-multi-item">
+                      <input type="checkbox" checked={selectedDomains.includes(d)} onChange={() => toggleDomain(d)} />
+                      <span>{domainLabel(d)}</span>
+                    </label>
+                  ))}
+                  <button type="button" className="si-multi-new" onClick={pickNewDomain}>
+                    ➕ Create New Domain
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
+
+          {draft.type === "relation" && !!initialName && (
+            <label className="si-form-label" style={{ flex: "0 0 auto", width: "auto" }}>
               <span className="si-form-label-text">Select Domain</span>
               <select
                 className="si-form-select"
@@ -254,64 +418,32 @@ const [fieldName, setFieldName] = useState(initialName);
                   const val = e.target.value;
                   if (val === "") {
                     set("relatedDomain", "");
-                    isPartOfRef.current = "fk";
-                    set("isPartOf", "fk");
+                    isPartOfRef.current = false;
+                    set("isPartOf", false);
                   } else if (val === "__new__") {
                     // Suggest the field name as a starting point for the
                     // new domain's name — editable in the input that
                     // appears below, not tied to it after this.
                     const suggestion = fieldName.trim() && fieldName.trim() !== parentDomainName ? fieldName.trim() : "";
                     set("relatedDomain", suggestion);
-                    // Default is a plain link (this domain gets a real
-                    // column) either way — the Integral/Association
-                    // toggle below lets you switch direction, regardless
-                    // of whether the target exists yet or is about to be
-                    // created.
-                    isPartOfRef.current = "fk";
-                    set("isPartOf", "fk");
+                    isPartOfRef.current = false;
+                    set("isPartOf", false);
                   } else {
                     set("relatedDomain", val);
-                    isPartOfRef.current = "fk";
-                    set("isPartOf", "fk");
+                    isPartOfRef.current = false;
+                    set("isPartOf", false);
                   }
                 }}
               >
                 <option value="">-- Select domain --</option>
                 {domainNames.filter((d) => d !== parentDomainName).map((d) => (
-                  <option key={d} value={d}>{d}</option>
+                  <option key={d} value={d}>{domainLabel(d)}</option>
                 ))}
                 <option value="__new__">➕ Create New Domain</option>
               </select>
             </label>
           )}
 
-
-          {draft.type === "relation" && draft.relatedDomain && domainNames.includes(draft.relatedDomain) && (
-  <div style={{ display:"flex", alignItems:"flex-end", gap:6 }}>
-    <span style={{
-      display:"inline-flex", alignItems:"center", gap:6,
-      whiteSpace:"nowrap", fontSize:12, padding:"7px 10px",
-      background:"#eef2ff", border:"1px solid #a5b4fc",
-      borderRadius:"var(--border-radius-md)", color:"#3730a3",
-    }}>
-      <LinkOutlinedIcon sx={{ fontSize: 13 }} />
-      {draft.isPartOf === "fk" ? (
-        <>Links to <strong>{draft.relatedDomain}</strong> — adds <code>{fieldName.trim() || "…"}</code> here</>
-      ) : draft.relationKind === "association" ? (
-        <>Association with <strong>{draft.relatedDomain}</strong> — junction table, no column on either side</>
-      ) : (
-        <>Integral — adds <code>{parentDomainName}Id</code> to <strong>{draft.relatedDomain}</strong></>
-      )}
-    </span>
-    {relationShapeSelector}
-    <button type="button"
-      onClick={() => { set("relatedDomain",""); set("listDomain",""); set("type","string"); set("isPartOf", true); isPartOfRef.current = true; }}
-      style={{ fontSize:13, color:"#9ca3af", background:"none", border:"none",
-        cursor:"pointer", lineHeight:1, padding:"0 4px" }}>
-      ×
-    </button>
-  </div>
-)}
 
           {/* "➕ Create New Domain" picked in the dropdown above — name it
               here (independent of the field name) and confirm. Confirming
@@ -341,7 +473,6 @@ const [fieldName, setFieldName] = useState(initialName);
                         style={{ minWidth: 160 }}
                       />
                     </label>
-                    {relationShapeSelector}
                     {!compact && (
                       <button type="button" className="btn btn-primary"
                         disabled={!canCreate}
@@ -369,7 +500,7 @@ const [fieldName, setFieldName] = useState(initialName);
                       </button>
                     )}
                     <button type="button"
-                      onClick={() => { set("relatedDomain",""); set("listDomain",""); set("type","string"); set("isPartOf", true); isPartOfRef.current = true; }}
+                      onClick={() => { set("relatedDomain",""); set("listDomain",""); set("type","string"); set("isPartOf", true); isPartOfRef.current = true; setExtraDomains([]); }}
                       style={{ fontSize:13, color:"#9ca3af", background:"none", border:"none",
                         cursor:"pointer", lineHeight:1, padding:"0 4px" }}>
                       ×
@@ -386,6 +517,36 @@ const [fieldName, setFieldName] = useState(initialName);
             })()
           )}
         </div>
+
+        {/* Owns / Uses — metadata label, shown once a domain is chosen. */}
+        {draft.type === "relation" && draft.relatedDomain && linkModeRadio}
+
+        {isMulti && (
+          <div className="si-multi-summary">
+            <div className="si-multi-summary-title">
+              Linking {allLinked.length} domains — one junction table each
+            </div>
+            <div className="si-multi-summary-tags">
+              {allLinked.map((dom) => (
+                <span key={dom} className="si-badge si-badge--indigo">
+                  <LinkOutlinedIcon sx={{ fontSize: 11 }} />
+                  {parentDomainName || "…"}_{dom}
+                  {dom !== draft.relatedDomain && (
+                    <button
+                      type="button"
+                      className="si-multi-remove"
+                      title={`Don't link ${dom}`}
+                      onClick={() => setExtraDomains((prev) => prev.filter((d) => d !== dom))}
+                    >×</button>
+                  )}
+                </span>
+              ))}
+            </div>
+            <div className="si-hint" style={{ marginLeft: 0 }}>
+              Saved as one field <strong>{fieldName.trim() ? toCamelCase(fieldName) : "…"}</strong> linked to all {allLinked.length} domains.
+            </div>
+          </div>
+        )}
 
         {!compact && (
         <div className="si-val-builder">
@@ -482,7 +643,7 @@ const [fieldName, setFieldName] = useState(initialName);
 
       <div className="si-form-actions si-form-actions--gap">
         <button className="btn btn-primary" type="button" onClick={submit} disabled={!fieldName.trim()}>
-          <AddCircleOutlinedIcon sx={{ fontSize: 16 }} />{submitLabel}
+          <AddCircleOutlinedIcon sx={{ fontSize: 16 }} />{isMulti ? `${submitLabel} (${allLinked.length} domains)` : submitLabel}
         </button>
         {onCancel && (
           <button className="btn btn-secondary" type="button" onClick={onCancel}>Cancel</button>

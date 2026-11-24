@@ -1,4 +1,5 @@
 import { useAuthStore } from "../../store/authStore";
+import { PermissionError, extractDetail } from "./permissionError";
 
 const API_BASE = import.meta.env.VITE_API_URL || "https://ab2dgab6euwc4d2f3dkgddmxiu0mmuxx.lambda-url.ap-south-1.on.aws";
 const STATIC_TOKEN: string = import.meta.env.VITE_API_TOKEN || "";
@@ -22,6 +23,7 @@ async function apiFetch(path: string, init: RequestInit = {}) {
       useAuthStore.getState().logout();
     }
     const text = await res.text().catch(() => res.statusText);
+    if (res.status === 403) throw new PermissionError(extractDetail(text) || "Permission denied");
     throw new Error(`API ${res.status}: ${text}`);
   }
   return res.json();
@@ -109,4 +111,23 @@ export async function apiSetUserRoles(userId: string, roleIds: string[]) {
 
 export async function apiGetUserPermissions(userId: string) {
   return apiFetch(`/rbac/users/${userId}/permissions`);
+}
+
+export async function apiCreateUser(data: {
+  user_name: string;
+  email: string;
+  password: string;
+  is_superuser: boolean;
+}) {
+  const res = await fetch(`${API_BASE}/rbac/users`, {
+    method: "POST",
+    headers: authHeaders(),
+    body: JSON.stringify(data),
+  });
+  const text = await res.text();
+  if (!res.ok) {
+    if (res.status === 403) throw new PermissionError(extractDetail(text) || "Permission denied");
+    throw new Error(extractDetail(text) || "Failed to create user");
+  }
+  try { return JSON.parse(text); } catch { return {}; }
 }

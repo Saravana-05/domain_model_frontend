@@ -1,5 +1,7 @@
 import React, { useState } from "react";
-import { useAuthStore } from "../../../store/authStore";
+import { isValidEmail } from "../../schema/types";
+import { usePermission } from "../../components/Can";
+import { isPermissionError } from "../../api/permissionError";
 import AddIcon                   from "@mui/icons-material/Add";
 import StorageIcon               from "@mui/icons-material/Storage";
 import SaveOutlinedIcon          from "@mui/icons-material/SaveOutlined";
@@ -11,7 +13,6 @@ import { Badge } from "./helpers";
 
 export function DataTab({ schemas, dbBackends = {} }: { schemas: AllSchemas; dbBackends?: Record<string, string> }) {
   const domainNames    = Object.keys(schemas.domains);
-  const hasPermission  = useAuthStore((s) => s.hasPermission);
   const [selectedDomain, setSelectedDomain] = useState(domainNames[0] ?? "");
   const [formValues,     setFormValues]     = useState<Record<string, string>>({});
   const [rows,           setRows]           = useState<Record<string, any>[] | null>(null);
@@ -21,8 +22,10 @@ export function DataTab({ schemas, dbBackends = {} }: { schemas: AllSchemas; dbB
   const activeBackend = dbBackends[selectedDomain] ?? "postgresql";
   const dbLabel = activeBackend === "dynamodb" ? "DynamoDB" : "PostgreSQL";
 
-  const canCreate = !selectedDomain || hasPermission(selectedDomain, "create");
-  const canView   = !selectedDomain || hasPermission(selectedDomain, "view");
+  const canCreateDomain = usePermission(selectedDomain, "create");
+  const canViewDomain   = usePermission(selectedDomain, "view");
+  const canCreate = !selectedDomain || canCreateDomain;
+  const canView   = !selectedDomain || canViewDomain;
 
   const domainFields = selectedDomain ? Object.entries(schemas.domains[selectedDomain]?.fields ?? {}) : [];
 
@@ -36,6 +39,12 @@ export function DataTab({ schemas, dbBackends = {} }: { schemas: AllSchemas; dbB
 
   async function handleInsert() {
     if (!selectedDomain) return;
+    for (const [fieldName, fieldDef] of domainFields) {
+      if (fieldDef.type === "email" && !isValidEmail((formValues[fieldName] ?? "").trim())) {
+        setStatus({ state: "err", msg: `❌ "${fieldName}" must be a valid email address (e.g. name@example.com)` });
+        return;
+      }
+    }
     setStatus({ state: "loading", msg: "Inserting row…" });
     try {
       const row: Record<string, any> = {};
@@ -55,7 +64,10 @@ export function DataTab({ schemas, dbBackends = {} }: { schemas: AllSchemas; dbB
         setStatus({ state: "err", msg: `❌ Insert failed: ${res.message}` });
       }
     } catch (err: any) {
-      setStatus({ state: "err", msg: `❌ Error: ${err?.message ?? String(err)}` });
+      setStatus({
+        state: "err",
+        msg: isPermissionError(err) ? `🔒 ${err.message}` : `❌ Error: ${err?.message ?? String(err)}`,
+      });
     }
   }
 
@@ -66,7 +78,10 @@ export function DataTab({ schemas, dbBackends = {} }: { schemas: AllSchemas; dbB
       const res = await apiListRows(selectedDomain);
       if (res.status === "success") setRows(res.data ?? []);
       else setRows([]);
-    } catch { setRows([]); }
+    } catch (err) {
+      setRows([]);
+      if (isPermissionError(err)) setStatus({ state: "err", msg: `🔒 ${err.message}` });
+    }
     finally { setLoadingRows(false); }
   }
 
@@ -123,7 +138,7 @@ export function DataTab({ schemas, dbBackends = {} }: { schemas: AllSchemas; dbB
                       <label className="si-data-field-label">
                         {label}
                         <span className="si-data-field-type">
-                          {isRelation ? <><Badge label="relation" color="indigo" /> → {(fieldDef as any).relatedDomain ?? "?"}</>
+                          {isRelation ? <><Badge label="domain_model" color="indigo" /> → {(fieldDef as any).relatedDomain ?? "?"}</>
                             : isList ? <><Badge label="list" color="green" /> → {(fieldDef as any).listDomain ?? "?"}</>
                             : fieldDef.type}
                         </span>
@@ -136,7 +151,7 @@ export function DataTab({ schemas, dbBackends = {} }: { schemas: AllSchemas; dbB
                         </select>
                       ) : (
                         <input
-                          type={fieldDef.type === "number" ? "number" : fieldDef.type === "date" ? "date" : "text"}
+                          type={fieldDef.type === "number" ? "number" : fieldDef.type === "date" ? "date" : fieldDef.type === "email" ? "email" : "text"}
                           className="si-data-input"
                           placeholder={isRelation ? `ID of related ${(fieldDef as any).relatedDomain ?? "record"}` : isList ? `Comma-separated IDs from ${(fieldDef as any).listDomain ?? "domain"}` : (ph || `Enter ${label}…`)}
                           value={formValues[fieldName] ?? ""} onChange={(e) => setField(fieldName, e.target.value)} />

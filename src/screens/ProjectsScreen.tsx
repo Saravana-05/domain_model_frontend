@@ -3,6 +3,8 @@ import AddIcon             from "@mui/icons-material/Add";
 import FolderOutlinedIcon  from "@mui/icons-material/FolderOutlined";
 import ArrowForwardIcon    from "@mui/icons-material/ArrowForward";
 import { useProjectStore } from "../core/store/projectStore";
+import { CreateEntityModal } from "../core/components/CreateEntityModal";
+import { DesignerOnly } from "../core/components/Can";
 
 interface ProjectsScreenProps {
   /** Fires when the user clicks a project card (or just finished creating
@@ -25,37 +27,16 @@ export function ProjectsScreen({ onOpenProject }: ProjectsScreenProps) {
   const createProject  = useProjectStore((s) => s.createProject);
 
   const [showCreate, setShowCreate] = useState(false);
-  const [name, setName]             = useState("");
-  const [description, setDescription] = useState("");
-  const [busy, setBusy]             = useState(false);
-  const [error, setError]           = useState<string | null>(null);
 
   useEffect(() => {
     fetchProjects();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  async function handleCreate() {
-    const trimmed = name.trim();
-    if (!trimmed) {
-      setError("Project name is required.");
-      return;
-    }
-    setBusy(true);
-    setError(null);
-    try {
-      const created = await createProject(trimmed, description.trim() || undefined);
-      if (created) {
-        setName("");
-        setDescription("");
-        setShowCreate(false);
-        onOpenProject(created.id);
-      } else {
-        setError("Couldn't create the project. Please try again.");
-      }
-    } finally {
-      setBusy(false);
-    }
+  async function handleCreate(v: { name: string; description: string }) {
+    const created = await createProject(v.name, v.description || undefined);
+    if (!created) throw new Error("Couldn't create the project. Please try again.");
+    onOpenProject(created.id);
   }
 
   return (
@@ -67,63 +48,24 @@ export function ProjectsScreen({ onOpenProject }: ProjectsScreenProps) {
             Group your domain models by project. Open a project to build domain models inside it.
           </p>
         </div>
-        <button
-          type="button"
-          className="page-header-btn page-header-btn--import"
-          onClick={() => { setShowCreate(true); setError(null); }}
-        >
-          <AddIcon sx={{ fontSize: 17 }} />
-          Create Project
-        </button>
+        <DesignerOnly>
+          <button
+            type="button"
+            className="page-header-btn page-header-btn--import"
+            onClick={() => setShowCreate(true)}
+          >
+            <AddIcon sx={{ fontSize: 17 }} />
+            Create Project
+          </button>
+        </DesignerOnly>
       </div>
 
       {showCreate && (
-        <div style={styles.createCard}>
-          <div style={styles.createRow}>
-            <div style={{ flex: 1 }}>
-              <label style={styles.label}>Project name</label>
-              <input
-                autoFocus
-                value={name}
-                disabled={busy}
-                onChange={(e) => setName(e.target.value)}
-                onKeyDown={(e) => e.key === "Enter" && handleCreate()}
-                placeholder="e.g. Clinic Management"
-                style={styles.input}
-              />
-            </div>
-            <div style={{ flex: 1 }}>
-              <label style={styles.label}>Description (optional)</label>
-              <input
-                value={description}
-                disabled={busy}
-                onChange={(e) => setDescription(e.target.value)}
-                onKeyDown={(e) => e.key === "Enter" && handleCreate()}
-                placeholder="What is this project for?"
-                style={styles.input}
-              />
-            </div>
-          </div>
-          {error && <div style={styles.error}>{error}</div>}
-          <div style={styles.createActions}>
-            <button
-              type="button"
-              className="page-header-btn page-header-btn--export"
-              disabled={busy}
-              onClick={handleCreate}
-            >
-              {busy ? "Creating…" : "Create"}
-            </button>
-            <button
-              type="button"
-              className="page-header-btn page-header-btn--filter"
-              disabled={busy}
-              onClick={() => { setShowCreate(false); setError(null); }}
-            >
-              Cancel
-            </button>
-          </div>
-        </div>
+        <CreateEntityModal
+          kind="project"
+          onSubmit={handleCreate}
+          onClose={() => setShowCreate(false)}
+        />
       )}
 
       {loading && projects.length === 0 && <div style={styles.hint}>Loading projects…</div>}

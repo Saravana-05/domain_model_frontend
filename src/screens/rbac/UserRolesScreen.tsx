@@ -1,7 +1,9 @@
 import { useEffect, useState } from "react";
 import { apiListUsers, apiListRoles, apiSetUserRoles } from "../../core/api/rbacApi";
 import { useAuthStore } from "../../store/authStore";
-import { SetupGuide } from "./SetupGuide";
+import type { CSSProperties } from "react";
+import AddIcon from "@mui/icons-material/Add";
+import { c, common, checkboxAccent } from "./rbacTheme";
 
 const API_BASE = import.meta.env.VITE_API_URL ?? "https://ab2dgab6euwc4d2f3dkgddmxiu0mmuxx.lambda-url.ap-south-1.on.aws";
 
@@ -96,54 +98,57 @@ export function UserRolesScreen() {
     finally { setCreating(false); }
   }
 
-  if (loading) return <div style={s.center}>Loading…</div>;
+  if (loading) return <div style={common.center}>Loading…</div>;
 
   return (
-    <div style={s.page}>
-      <SetupGuide currentStep={4} />
+    <div style={common.page}>
 
-      <div style={s.headerRow}>
+      <div style={common.header}>
         <div>
-          <h2 style={s.heading}>Users & Role Assignments</h2>
-          <p style={s.sub}>
+          <h1 style={common.title}>Users & Role Assignments</h1>
+          <p style={common.subtitle}>
             Create users, then assign them roles. Each role carries its own set of permissions.
           </p>
         </div>
-        <button style={s.createBtn} onClick={() => { setShowCreate(true); setCreateError(""); }}>
-          + Create User
+        <button
+          className="page-header-btn page-header-btn--import"
+          onClick={() => { setShowCreate(true); setCreateError(""); }}
+        >
+          <AddIcon sx={{ fontSize: 17 }} />
+          Create User
         </button>
       </div>
 
-      {error && <div style={s.error}>{error}</div>}
+      {error && <div style={common.error}>{error}</div>}
 
       {/* Create User Modal */}
       {showCreate && (
-        <div style={s.modalOverlay} onClick={() => setShowCreate(false)}>
-          <div style={s.modal} onClick={(e) => e.stopPropagation()}>
+        <div style={common.backdrop} onMouseDown={() => { if (!creating) setShowCreate(false); }}>
+          <div style={common.dialog} onMouseDown={(e) => e.stopPropagation()}>
             <h3 style={s.modalTitle}>Create New User</h3>
 
-            {createError && <div style={s.error}>{createError}</div>}
+            {createError && <div style={common.error}>{createError}</div>}
 
-            <label style={s.label}>Full Name</label>
+            <label style={common.label}>Full Name</label>
             <input
-              style={s.input}
+              style={common.input}
               placeholder="e.g. John Doe"
               value={form.user_name}
               onChange={(e) => setForm({ ...form, user_name: e.target.value })}
             />
 
-            <label style={s.label}>Email (used to login)</label>
+            <label style={common.label}>Email (used to login)</label>
             <input
-              style={s.input}
+              style={common.input}
               type="email"
               placeholder="john@example.com"
               value={form.email}
               onChange={(e) => setForm({ ...form, email: e.target.value })}
             />
 
-            <label style={s.label}>Password</label>
+            <label style={common.label}>Password</label>
             <input
-              style={s.input}
+              style={common.input}
               type="password"
               placeholder="Min 8 chars, 1 uppercase, 1 number, 1 special"
               value={form.password}
@@ -155,29 +160,35 @@ export function UserRolesScreen() {
             <label style={s.checkRow}>
               <input
                 type="checkbox"
+                style={checkboxAccent}
                 checked={form.is_superuser}
                 onChange={(e) => setForm({ ...form, is_superuser: e.target.checked })}
               />
-              <span>Make this user a <strong>Product Admin</strong> (bypasses all permission checks)</span>
+              <span>Make this user a <strong style={{ color: c.text }}>Product Admin</strong> (bypasses all permission checks)</span>
             </label>
 
             <div style={{ display: "flex", gap: 10, marginTop: 20 }}>
-              <button style={s.btn} onClick={createUser} disabled={creating}>
+              <button
+                className="page-header-btn page-header-btn--import"
+                style={{ flex: 1, justifyContent: "center", opacity: creating ? 0.6 : 1 }}
+                onClick={createUser}
+                disabled={creating}
+              >
                 {creating ? "Creating…" : "Create User"}
               </button>
-              <button style={s.cancelBtn} onClick={() => setShowCreate(false)}>Cancel</button>
+              <button style={common.btnGhost} onClick={() => setShowCreate(false)}>Cancel</button>
             </div>
           </div>
         </div>
       )}
 
       {roles.length === 0 && (
-        <div style={s.warn}>No roles defined yet — go to Step 2 to create roles first.</div>
+        <div style={common.warn}>No roles defined yet — go to Step 2 to create roles first.</div>
       )}
 
       {users.length === 0 && (
-        <div style={s.empty}>
-          No users yet. Click <strong>"+ Create User"</strong> above to add the first user.
+        <div style={common.empty}>
+          No users yet. Click <strong style={{ color: c.text }}>"+ Create User"</strong> above to add the first user.
         </div>
       )}
 
@@ -198,7 +209,8 @@ export function UserRolesScreen() {
                   </div>
                 </div>
                 <button
-                  style={{ ...s.saveBtn, ...(isSaved ? s.saveBtnDone : {}) }}
+                  className="page-header-btn page-header-btn--import"
+                  style={{ padding: "8px 18px", opacity: isSaving ? 0.6 : 1, ...(isSaved ? s.saveBtnDone : {}) }}
                   onClick={() => saveUser(u.user_id)}
                   disabled={isSaving}
                 >
@@ -209,14 +221,14 @@ export function UserRolesScreen() {
               <div style={s.rolesSection}>
                 <div style={s.rolesLabel}>Assign roles:</div>
                 {roles.length === 0 ? (
-                  <span style={{ color: "#9ca3af", fontSize: 13 }}>No roles defined yet.</span>
+                  <span style={{ color: c.textMuted, fontSize: 13 }}>No roles defined yet.</span>
                 ) : (
                   <div style={s.rolesRow}>
                     {roles.map((r) => {
                       const checked = userRoles.has(r.id);
                       return (
                         <label key={r.id} style={{ ...s.roleLabel, ...(checked ? s.roleLabelOn : {}) }}>
-                          <input type="checkbox" checked={checked} onChange={() => toggle(u.user_id, r.id)} />
+                          <input type="checkbox" style={checkboxAccent} checked={checked} onChange={() => toggle(u.user_id, r.id)} />
                           <span style={{ ...s.rolePill, ...(checked ? s.rolePillOn : s.rolePillOff) }}>
                             {r.name}
                           </span>
@@ -234,40 +246,23 @@ export function UserRolesScreen() {
   );
 }
 
-const s: Record<string, React.CSSProperties> = {
-  page:        { padding: "24px 32px", maxWidth: 860, margin: "0 auto" },
-  headerRow:   { display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 8, gap: 16 },
-  heading:     { fontSize: 20, fontWeight: 700, margin: "0 0 4px", color: "#111" },
-  sub:         { margin: 0, color: "#6b7280", fontSize: 14, lineHeight: 1.5 },
-  createBtn:   { padding: "10px 18px", borderRadius: 8, border: "none", background: "#4f46e5", color: "#fff", fontWeight: 600, cursor: "pointer", fontSize: 14, whiteSpace: "nowrap" },
-  center:      { textAlign: "center", padding: 40, color: "#888" },
-  error:       { background: "#fee2e2", color: "#b91c1c", borderRadius: 6, padding: "10px 14px", marginBottom: 12, fontSize: 13 },
-  warn:        { background: "#fef9c3", color: "#854d0e", border: "1px solid #fde68a", borderRadius: 8, padding: "12px 16px", marginBottom: 12, fontSize: 14 },
-  empty:       { color: "#9ca3af", fontSize: 14, textAlign: "center", padding: 48, background: "#f9fafb", borderRadius: 10, border: "1px dashed #e5e7eb" },
+const s: Record<string, CSSProperties> = {
   list:        { display: "flex", flexDirection: "column", gap: 10, marginTop: 16 },
-  card:        { background: "#fff", border: "1px solid #e5e7eb", borderRadius: 10, overflow: "hidden" },
-  userHeader:  { display: "flex", justifyContent: "space-between", alignItems: "center", padding: "14px 18px", borderBottom: "1px solid #f3f4f6" },
-  avatar:      { width: 38, height: 38, borderRadius: "50%", background: "#4f46e5", color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 700, fontSize: 16, flexShrink: 0 },
-  userName:    { fontWeight: 600, fontSize: 15, color: "#111" },
-  userEmail:   { fontSize: 13, color: "#6b7280", marginTop: 2 },
-  saveBtn:     { padding: "8px 18px", borderRadius: 8, border: "none", background: "#4f46e5", color: "#fff", fontWeight: 600, cursor: "pointer", fontSize: 13 },
-  saveBtnDone: { background: "#059669" },
-  rolesSection:{ padding: "12px 18px 14px" },
-  rolesLabel:  { fontSize: 12, color: "#9ca3af", fontWeight: 600, textTransform: "uppercase" as const, marginBottom: 10 },
+  card:        common.card,
+  userHeader:  { display: "flex", justifyContent: "space-between", alignItems: "center", padding: "14px 18px", borderBottom: `1px solid ${c.border}`, gap: 12 },
+  avatar:      { width: 38, height: 38, borderRadius: "50%", background: c.accent, color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 700, fontSize: 16, flexShrink: 0 },
+  userName:    { fontWeight: 700, fontSize: 15, color: c.text },
+  userEmail:   { fontSize: 12, color: c.textSub, marginTop: 2 },
+  saveBtnDone: { background: "linear-gradient(135deg, #16a34a 0%, #15803d 100%)", boxShadow: "0 2px 8px rgba(22,163,74,0.35)" },
+  rolesSection:{ padding: "12px 18px 16px" },
+  rolesLabel:  { fontSize: 11, color: c.accentText, fontWeight: 700, textTransform: "uppercase", letterSpacing: 1, marginBottom: 10 },
   rolesRow:    { display: "flex", gap: 8, flexWrap: "wrap" },
-  roleLabel:   { display: "flex", alignItems: "center", gap: 6, cursor: "pointer", padding: "4px 8px", borderRadius: 8, border: "1.5px solid #e5e7eb", background: "#fff" },
-  roleLabelOn: { border: "1.5px solid #a78bfa", background: "#f5f3ff" },
-  rolePill:    { padding: "4px 10px", borderRadius: 20, fontSize: 13, fontWeight: 500 },
-  rolePillOn:  { background: "#ede9fe", color: "#5b21b6" },
-  rolePillOff: { background: "#f3f4f6", color: "#6b7280" },
-  // Modal
-  modalOverlay:{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.4)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000 },
-  modal:       { background: "#fff", borderRadius: 14, padding: "28px 32px", width: 460, maxWidth: "95vw", boxShadow: "0 20px 60px rgba(0,0,0,0.2)", display: "flex", flexDirection: "column", gap: 10 },
-  modalTitle:  { fontSize: 18, fontWeight: 700, color: "#111", margin: "0 0 8px" },
-  label:       { fontSize: 13, fontWeight: 600, color: "#374151" },
-  input:       { padding: "10px 12px", borderRadius: 8, border: "1.5px solid #d1d5db", fontSize: 14, outline: "none" },
-  hint:        { fontSize: 12, color: "#9ca3af", marginTop: -4 },
-  checkRow:    { display: "flex", alignItems: "center", gap: 8, cursor: "pointer", fontSize: 14, color: "#374151" },
-  btn:         { flex: 1, padding: "11px", borderRadius: 8, border: "none", background: "#4f46e5", color: "#fff", fontWeight: 600, cursor: "pointer", fontSize: 14 },
-  cancelBtn:   { padding: "11px 20px", borderRadius: 8, border: "1px solid #e5e7eb", background: "#fff", color: "#374151", cursor: "pointer", fontSize: 14 },
+  roleLabel:   { display: "flex", alignItems: "center", gap: 6, cursor: "pointer", padding: "4px 8px", borderRadius: 8, border: `1px solid ${c.borderInput}`, background: c.inputBg },
+  roleLabelOn: { border: `1px solid ${c.accentBorder}`, background: c.accentSoft },
+  rolePill:    { padding: "3px 8px", borderRadius: 20, fontSize: 13, fontWeight: 600 },
+  rolePillOn:  { color: "#c4b0fa" },
+  rolePillOff: { color: c.textSub },
+  modalTitle:  { fontSize: 18, fontWeight: 700, color: c.text, margin: "0 0 8px" },
+  hint:        { fontSize: 12, color: c.textMuted, marginTop: -4 },
+  checkRow:    { display: "flex", alignItems: "center", gap: 8, cursor: "pointer", fontSize: 14, color: c.textSub },
 };

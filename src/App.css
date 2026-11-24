@@ -197,6 +197,7 @@ body {
 
 .si-card-header {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 12px;
   padding: 14px 20px;
@@ -1017,6 +1018,7 @@ body {
    edge, then a small fixed gap between the two buttons inside it. */
 .si-card-header-actions {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 8px;
   margin-left: auto;
@@ -1048,6 +1050,11 @@ body {
 }
 .si-edit-btn:hover { background: var(--border); border-color: var(--border-strong); color: var(--text-primary); }
 .si-edit-btn--active { background: var(--indigo-bg); border-color: #818cf8; color: var(--indigo-text); }
+.si-edit-btn--danger,
+.si-icon-btn--danger { background: rgba(239, 68, 68, 0.10); border-color: rgba(239, 68, 68, 0.45); color: #f87171; }
+.si-edit-btn--danger:hover,
+.si-icon-btn--danger:hover { background: rgba(239, 68, 68, 0.22); border-color: #ef4444; color: #fca5a5; }
+.si-edit-btn:disabled { opacity: 0.55; cursor: default; }
 
 /* ── Inline edit row ─────────────────────────────────────────────────────── */
 .si-edit-row { padding: 0 !important; background: var(--surface-alt) !important; }
@@ -1523,3 +1530,29 @@ body {
   box-shadow: 0 4px 14px rgba(51, 65, 85, 0.45);
   transform: translateY(-1px);
 }
+
+/* ── Multi-domain relation picker (FieldBuilder) ── */
+.si-multi-menu { position: absolute; top: 100%; left: 0; z-index: 30; min-width: 230px; max-height: 260px; overflow-y: auto; margin-top: 4px; padding: 4px; background: var(--surface-raised); border: 1px solid var(--border-strong); border-radius: 8px; box-shadow: 0 8px 24px rgba(0,0,0,0.4); }
+.si-multi-item { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-radius: 6px; font-size: 13px; color: var(--text-primary); cursor: pointer; }
+.si-multi-item:hover, .si-multi-new:hover { background: var(--surface-alt); }
+.si-multi-item input { accent-color: #8b5cf6; margin: 0; }
+.si-multi-empty { padding: 6px 8px; font-size: 12px; color: var(--text-secondary); }
+.si-multi-new { display: block; width: 100%; margin-top: 4px; padding: 7px 8px; text-align: left; font-size: 13px; color: var(--indigo-text); background: none; border: none; border-top: 1px solid var(--border); border-radius: 0 0 6px 6px; cursor: pointer; }
+.si-multi-summary { display: flex; flex-direction: column; gap: 6px; margin-top: 10px; }
+.si-multi-summary-title { font-size: 12px; font-weight: 600; color: var(--text-secondary); }
+.si-multi-summary-tags { display: flex; flex-wrap: wrap; gap: 6px; }
+.si-multi-summary-tags .si-badge { display: inline-flex; align-items: center; gap: 5px; }
+.si-multi-remove { background: none; border: none; padding: 0; margin-left: 2px; font-size: 13px; line-height: 1; color: var(--text-muted); cursor: pointer; }
+.si-multi-remove:hover { color: var(--red-text); }
+
+/* ── Fields table: scroll sideways on narrow windows, keep Edit/Delete pinned ── */
+.si-table-scroll { overflow-x: auto; }
+.si-table td.si-actions-cell, .si-table th.si-actions-cell { position: sticky; right: 0; z-index: 1; white-space: nowrap; box-shadow: -8px 0 8px -8px rgba(0,0,0,0.5); }
+.si-table td.si-actions-cell { background: var(--surface); }
+.si-table th.si-actions-cell { background: var(--surface-alt); }
+.si-table tr:hover td.si-actions-cell { background: var(--surface-alt); }
+/* Sidebar scrollbar: dark, thin, blends with the sidebar instead of the default white track */
+aside nav::-webkit-scrollbar { width: 6px; }
+aside nav::-webkit-scrollbar-track { background: transparent; }
+aside nav::-webkit-scrollbar-thumb { background: #4a4060; border-radius: 6px; }
+aside nav::-webkit-scrollbar-thumb:hover { background: #6b5f8a; }

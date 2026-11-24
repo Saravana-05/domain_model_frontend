@@ -1,4 +1,4 @@
-export type FieldType = "string" | "number" | "decimal" | "boolean" | "date" | "list" | "image" | "relation";
+export type FieldType = "string" | "email" | "number" | "decimal" | "boolean" | "date" | "list" | "image" | "relation";
 export type ComponentType = "text" | "number" | "select" | "checkbox" | "textarea" | "date";
 export type FieldFormat   = "email" | "phone" | "url" | "currency" | "percentage";
 export type HttpMethod    = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
@@ -146,6 +146,15 @@ export interface DomainFieldCore {
    */
   relatedDomain?:   string;
   /**
+   * Association fields that link SEVERAL domains at once (one field, e.g.
+   * "service" → MediaService, EventService, PrService; one junction table
+   * per domain). Always includes `relatedDomain` as its first entry.
+   * Omitted for ordinary single-domain relations.
+   */
+  relatedDomains?:  string[];
+  /** Marks an FK field created as part of an associative multi-link domain. */
+  multiLinkDomain?: boolean;
+  /**
    * Only meaningful for FK relation fields pointing at an EXISTING domain
    * (the "belongs-to" case, e.g. branch.clinicId → clinic). Tags whether
    * the relationship is structural ("integral" — the record only ever
@@ -155,6 +164,8 @@ export interface DomainFieldCore {
    * field so the view-builder can read it.
    */
   relationKind?:    "integral" | "association";
+  /** Owns / Uses label — metadata only, never affects table structure. */
+  linkMode?:        "owns" | "uses";
   /**
    * For "relation" fields — whether this field points to a single related
    * record ("one") or a collection of them ("many"/"list"). Used by
@@ -202,6 +213,9 @@ export interface DomainViewConfig {
 
 export interface DomainDefinition {
   name:        string;
+  /** Business name as typed by the user (e.g. "Client Details"), kept
+   *  separately from `name`, which is the storage name ("ClientDetails"). */
+  label?:      string;
   fields:      Record<string, DomainFieldCore>;
   viewConfig?: DomainViewConfig;
 }
@@ -300,6 +314,9 @@ export interface DomainFieldDef {
   computed?:      boolean;
   format?:        FieldFormat;
   relatedDomain?: string;
+  relatedDomains?: string[];
+  multiLinkDomain?: boolean;
+  linkMode?:      "owns" | "uses";
   listDomain?:    string;
   /**
    * For "relation" fields — mirrors DomainFieldCore.cardinality. Added so
@@ -310,6 +327,8 @@ export interface DomainFieldDef {
 }
 
 export interface DomainDef {
+  /** Business name (see DomainDefinition.label). */
+  label?: string;
   fields: Record<string, DomainFieldDef>;
 }
 
@@ -401,3 +420,21 @@ export interface ResolvedScreen {
 }
 
 export type DependencyGraph = Record<string, string[]>;
+
+
+// ── Email validation (shared by form engine, backend save payload and Data tab) ──
+/** Empty is allowed here (use the "required" rule to force a value). */
+export const EMAIL_PATTERN = "^(?:[^@\\s]+@[^@\\s]+\\.[^@\\s]{2,})?$";
+export const EMAIL_MESSAGE = "Enter a valid email address";
+
+export function isValidEmail(value: unknown): boolean {
+  if (value === null || value === undefined || value === "") return true;
+  return typeof value === "string" && new RegExp(EMAIL_PATTERN).test(value.trim());
+}
+
+export const EMAIL_RULE = { type: "pattern" as const, value: EMAIL_PATTERN, message: EMAIL_MESSAGE };
+
+/** True when a validation list already carries an email pattern rule. */
+export function hasEmailRule(rules: { type: string; value?: any }[]): boolean {
+  return rules.some((r) => r.type === "pattern" && /@/.test(String(r.value ?? "")));
+}

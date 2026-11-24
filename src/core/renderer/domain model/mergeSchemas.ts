@@ -17,6 +17,9 @@ export interface ExtraSchemaState {
    *  Populated in handleLoadFromBackend (SchemaInspector.tsx); undefined
    *  entries mean that domain model has no project (global/unassigned). */
   projectIds:  Record<string, string>;
+  /** domainName -> module_id (Project → Module → Domain model). Same
+   *  rules as projectIds: undefined entries mean "not in any module". */
+  moduleIds:   Record<string, string>;
   /**
    * Rules created on the spot via "Create new rule" in the field builder,
    * instead of being pre-written into src/validations/index.ts. Layered
@@ -37,7 +40,7 @@ export interface ExtraSchemaState {
 
 export const EMPTY_EXTRA: ExtraSchemaState = {
   newDomains: [], extraFields: {}, uiHints: {}, rbacRules: {}, abacRules: {},
-  viewConfigs: {}, dbBackends: {}, versioned: {}, projectIds: {}, extraValidationRules: {}, junctionPairs: new Set(),
+  viewConfigs: {}, dbBackends: {}, versioned: {}, projectIds: {}, moduleIds: {}, extraValidationRules: {}, junctionPairs: new Set(),
 };
 // ════════════════════════════════════════════════════════════════════════════
 // Merge helper
