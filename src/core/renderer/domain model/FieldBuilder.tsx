@@ -200,11 +200,7 @@ const [fieldName, setFieldName] = useState(initialName);
   // Two domains can share a visible name (different projects, or a leftover
   // copy) while having different storage keys — show the key for those so
   // they can be told apart.
-  const domainLabel = (d: string): string => {
-    const vis = displayDomainName(d);
-    const clash = domainNames.filter((x) => displayDomainName(x) === vis).length > 1;
-    return clash ? `${vis} (${d})` : vis;
-  };
+  const domainLabel = (d: string): string => displayDomainName(d);
   const selectedDomains = canMultiLink ? [draft.relatedDomain, ...linkedExtras] : [];
   const pendingNewDomain = draft.relatedDomain !== "" && !domainNames.includes(draft.relatedDomain);
 

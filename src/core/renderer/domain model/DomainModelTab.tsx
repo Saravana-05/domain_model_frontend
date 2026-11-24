@@ -1,6 +1,6 @@
 import React, { useState, useMemo, useRef, useEffect } from "react";
 import { useCanDesign, DESIGNER_RESOURCE } from "../../components/Can";
-import { refreshAuthContext, displayDomainName } from "../../api/datastoreApi";
+import { refreshAuthContext, displayDomainName, isJunctionTable } from "../../api/datastoreApi";
 import { useAuthStore } from "../../../store/authStore";
 import StorageIcon             from "@mui/icons-material/Storage";
 import LinkOutlinedIcon        from "@mui/icons-material/LinkOutlined";
@@ -177,13 +177,8 @@ export function DomainModelTab({
   // multi-link domains are real models and stay visible.
   const isLinkTable = (name: string): boolean => {
     const fields = schemas.domains[name]?.fields ?? {};
-    const keys = Object.keys(fields);
-    if (keys.length !== 2 || !keys.every((f) => f.endsWith("Id"))) return false;
-    if (Object.values(fields).some((f: any) => f.multiLinkDomain)) return false;
-    if (multiLinkDomains.has(name)) return false;
-    const [a, b] = keys.map((f) => f.slice(0, -2).toLowerCase());
-    const base = displayDomainName(name).toLowerCase();
-    return base === `${a}_${b}` || base === `${b}_${a}`;
+    const multi = Object.values(fields).some((f: any) => f.multiLinkDomain) || multiLinkDomains.has(name);
+    return isJunctionTable(name, Object.keys(fields), { multiLink: multi });
   };
   const visibleDomainNames = domainNames.filter((n) => !isLinkTable(n));
   const pickerDomainNames = linkableDomainNames ?? domainNames;
@@ -392,14 +387,14 @@ export function DomainModelTab({
                   return (
                     <React.Fragment key={fieldName}>
                       <tr>
-                        <td className="si-field-name">{fieldName}</td>
+                        <td className="si-field-name">{displayDomainName(fieldName)}</td>
                         <td>
                           {isRelation ? (
                             <span className="si-relation-cell" style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
                               <Badge label="domain_model 🔗" color="indigo" />
                               <LinkOutlinedIcon sx={{ fontSize: 11 }} />
                               {((fieldDef as any).relatedDomains?.length ? (fieldDef as any).relatedDomains as string[] : [relatedDomain]).map((rd) => (
-                                <Badge key={rd} label={rd} color="indigo" />
+                                <Badge key={rd} label={displayDomainName(rd)} color="indigo" />
                               ))}
                             </span>
                           ) : (

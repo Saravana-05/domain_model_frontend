@@ -8,7 +8,7 @@ import AddIcon                from "@mui/icons-material/Add";
 import RefreshIcon            from "@mui/icons-material/Refresh";
 import { useProjectStore } from "../../core/store/projectStore";
 import { apiListAllModules, apiCreateModule, type BackendModule } from "../api/moduleApi";
-import { apiListSchemas, displayDomainName } from "../api/datastoreApi";
+import { apiListSchemas, displayDomainName, isJunctionTable } from "../api/datastoreApi";
 import { CreateEntityModal } from "./CreateEntityModal";
 
 /** One domain model as the tree needs it. */
@@ -106,7 +106,17 @@ export function SidebarTree({
       ]);
       setModules(mods.data ?? []);
       setDomains(
-        ((schemas as any).schemas ?? []).map((s: any) => ({
+        ((schemas as any).schemas ?? [])
+          // hide auto-created junction tables from the tree
+          .filter((s: any) => {
+            const fields: any[] = s.schema ?? [];
+            return !isJunctionTable(
+              s.table_name,
+              fields.map((f) => f.field_id),
+              { multiLink: fields.some((f) => f.multiLinkDomain) },
+            );
+          })
+          .map((s: any) => ({
           name:      s.table_name,                       // internal key - used for every API call
           display:   displayDomainName(s.table_name, s.domain_name),   // what the user should see
           label:     s.label ?? undefined,

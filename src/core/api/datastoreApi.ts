@@ -59,7 +59,27 @@ export interface BackendSchemaField {
  */
 export function displayDomainName(key: string, domainName?: string | null): string {
   const base = (domainName && domainName.trim()) ? domainName : key;
-  return base.replace(/__(?:\d+|np)(?:_\d+)?$/, "");
+  // Strip the "__<projectId>" suffix wherever it appears (also in the middle of
+  // an auto-named junction table such as "Client__13_Output").
+  return base.replace(/__(?:\d+|np)(?:_\d+)?(?=_|$)/g, "");
+}
+
+/**
+ * True for an auto-created junction (link) table: exactly two "<Domain>Id"
+ * columns and a name of the form "A_B". These are plumbing, never shown in
+ * the UI. Explicit multi-link domains are real models and return false.
+ * `fieldIds` are the table's column names.
+ */
+export function isJunctionTable(
+  key: string,
+  fieldIds: string[],
+  opts: { multiLink?: boolean } = {},
+): boolean {
+  if (opts.multiLink) return false;
+  if (fieldIds.length !== 2 || !fieldIds.every((f) => f.endsWith("Id"))) return false;
+  const [a, b] = fieldIds.map((f) => displayDomainName(f.slice(0, -2)).toLowerCase());
+  const base = displayDomainName(key).toLowerCase();
+  return base === `${a}_${b}` || base === `${b}_${a}`;
 }
 
 export interface BackendCreateRequest {
