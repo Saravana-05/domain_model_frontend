@@ -386,7 +386,10 @@ export function CreateDomainTab({ onAdd, registry = {}, domainNames = [], onQuic
           const rbac = draftToRBACRule(d); if (rbac) rbacRules[fp] = rbac;
           const abac = draftToABACRule(d); if (abac) abacRules[fp] = abac;
 
-          const targetKnown = !!schemas?.domains?.[d.relatedDomain] || !!externalKnownFields[d.relatedDomain];
+          // `schemas` is scoped to the current module, so a domain living in another
+          // module of this project (e.g. IDAM "User") is absent from it. `domainNames`
+          // is the project-wide list — without it a stub empty copy gets created.
+          const targetKnown = !!schemas?.domains?.[d.relatedDomain] || !!externalKnownFields[d.relatedDomain] || domainNames.includes(d.relatedDomain);
           if (!targetKnown && !relatedDomains.find((r) => r.name === d.relatedDomain)) {
             relatedDomains.push({ name: d.relatedDomain, fields: {} });
           }
@@ -438,7 +441,7 @@ export function CreateDomainTab({ onAdd, registry = {}, domainNames = [], onQuic
         } as any;
         uiHints[`${name}.${n}`] = { label: primaryLabel(d.labels, n) };
         for (const target of linkedTargets) {
-          const targetKnown = !!schemas?.domains?.[target] || !!externalKnownFields[target];
+          const targetKnown = !!schemas?.domains?.[target] || !!externalKnownFields[target] || domainNames.includes(target);
           if (!targetKnown && !relatedDomains.find((r) => r.name === target)) {
             relatedDomains.push({ name: target, fields: {} });
           }
