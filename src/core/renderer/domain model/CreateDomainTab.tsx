@@ -188,6 +188,16 @@ export function CreateDomainTab({ onAdd, registry = {}, domainNames = [], onQuic
   // fields, not just the state held in this component.
   const [formKey, setFormKey] = useState(0);
 
+  // True right after a child domain was created and the form switched back
+  // to its (not yet created) parent — the "ok" banner then describes the
+  // child, so the button must not claim the parent is already created.
+  const [returnedToParent, setReturnedToParent] = useState(false);
+
+  // Field currently open for editing in the "Fields added" table (null = none).
+  const [editingField, setEditingField] = useState<string | null>(null);
+  // Switching to another domain (new / resume / pop back) closes any open edit.
+  useEffect(() => { setEditingField(null); }, [domainName]);
+
   /** Back to a blank form after a domain was actually created/submitted.
    *  Keeps the things that describe WHERE you're working rather than WHAT
    *  you were building: project, module and database backend. The result
@@ -199,6 +209,7 @@ export function CreateDomainTab({ onAdd, registry = {}, domainNames = [], onQuic
     setVersioned(false);
     setExpandedFields({});
     setActiveDraftId(null);
+    setReturnedToParent(false);
     setFormKey((k) => k + 1);
   }
 
@@ -238,9 +249,31 @@ export function CreateDomainTab({ onAdd, registry = {}, domainNames = [], onQuic
     // typed in FieldBuilder — no restriction on the UI side.
     const name = toCamelCase(rawName);
     setFields((p) => ({ ...p, [name]: draft }));
+    setReturnedToParent(false);
     if (draft.type === "relation" && draft.relatedDomain) {
       setExpandedFields((prev) => ({ ...prev, [name]: true }));
     }
+    setStatus({ state: "idle", msg: "" });
+    setGenerated(false);
+  }
+  /** Save an edited field. A rename keeps the field's position in the list. */
+  function handleEditField(oldName: string, rawNewName: string, draft: FieldDraft) {
+    const newName = toCamelCase(rawNewName);
+    setFields((prev) => {
+      const next: Record<string, FieldDraft> = {};
+      for (const [k, v] of Object.entries(prev)) {
+        if (k === oldName) next[newName] = draft;
+        else if (k !== newName) next[k] = v;
+      }
+      return next;
+    });
+    if (draft.type === "relation" && draft.relatedDomain) {
+      setExpandedFields((prev) => {
+        const { [oldName]: _old, ...rest } = prev;
+        return { ...rest, [newName]: true };
+      });
+    }
+    setEditingField(null);
     setStatus({ state: "idle", msg: "" });
     setGenerated(false);
   }
@@ -605,6 +638,7 @@ export function CreateDomainTab({ onAdd, registry = {}, domainNames = [], onQuic
   async function createDomain() {
     if (!canCreate) return;
     setStatus({ state: "loading", msg: "Creating tables in database..." });
+    setReturnedToParent(false);
 
     const payload = buildPayload();
     const messages = await createDomainFromPayload(payload);
@@ -640,6 +674,7 @@ export function CreateDomainTab({ onAdd, registry = {}, domainNames = [], onQuic
           setExpandedFields(parentDraft.expandedFields);
           setGenerated(false);
           setFormKey((k) => k + 1);
+          setReturnedToParent(true);
         }
       } else {
         resetForm();
@@ -817,6 +852,7 @@ export function CreateDomainTab({ onAdd, registry = {}, domainNames = [], onQuic
     }
   }
 
+  void createAllDomains; // button hidden for now; keep referenced so unused-locals lint stays quiet
   const codeGenFields: Record<string, DomainFieldCore> = {};
   for (const [n, d] of Object.entries(fields)) { codeGenFields[n] = draftToDomainFieldCore(d); }
 
@@ -1045,7 +1081,7 @@ export function CreateDomainTab({ onAdd, registry = {}, domainNames = [], onQuic
               <div className="si-card">
                 <table className="si-table">
                   <thead>
-                    <tr><th>Field</th><th>Type</th><th>Related Domain</th><th>Default</th><th>Datasource</th><th>Computed</th><th>Val Refs</th><th></th></tr>
+                    <tr><th>Field</th><th>Type</th><th>Cardinality</th><th>Format</th><th>Validation Refs</th><th></th></tr>
                   </thead>
                   <tbody>
                     {Object.entries(fields).map(([name, d]) => {
@@ -1071,32 +1107,24 @@ export function CreateDomainTab({ onAdd, registry = {}, domainNames = [], onQuic
                             <td>
                               {d.type === "relation" ? <Badge label="domain_model" color="indigo" />
                                 : d.type === "list" ? <Badge label="list" color="green" />
-                                : <Badge label={d.type} color="purple" />}
+                                : <Badge label={d.type === "string" ? "text" : d.type} color="purple" />}
                             </td>
                             <td>
-                              {d.relatedDomain ? (
-                                <span className="si-relation-cell">
-                                  <LinkOutlinedIcon sx={{ fontSize: 11 }} />
-                                  <Badge label={d.relatedDomain.startsWith("__new__:") ? d.relatedDomain.split(":")[1] + " (pending)" : d.relatedDomain} color="indigo" />
-                                  {draftOrder.includes(d.relatedDomain) && !domainNames.includes(d.relatedDomain) && (
-                                    <span style={{ fontSize: 10, color: "#9ca3af", marginLeft: 4 }}>(paused — not created yet)</span>
-                                  )}
-                                </span>
-                              ) : d.listDomain ? (
-                                <span className="si-list-cell">
-                                  <LinkOutlinedIcon sx={{ fontSize: 11 }} />
-                                  <Badge label={d.listDomain} color="green" />
-                                  <span className="si-list-many-tag">[ ] many</span>
-                                </span>
-                              ) : <span className="si-muted">—</span>}
+                              <Badge
+                                label={d.cardinality === "list" || d.cardinality === "many" || d.type === "list" ? "many" : "one"}
+                                color="blue"
+                              />
                             </td>
-                            <td>{d.default ? <code style={{ fontSize: 11 }}>{d.default}</code> : <span className="si-muted">—</span>}</td>
-                            <td>{d.datasource ? <Badge label={d.datasource} color="blue" /> : <span className="si-muted">—</span>}</td>
-                            <td>{d.computed ? <Badge label="yes" color="teal" /> : <span className="si-muted">—</span>}</td>
+                            <td>{(d as any).format ? <Badge label={(d as any).format} color="blue" /> : <span className="si-muted">—</span>}</td>
                             <td>{d.validationRefs.length > 0
                               ? <span className="si-val-list">{d.validationRefs.map((t) => <span key={t} className="si-val-ref"><LabelIcon sx={{ fontSize: 10 }} />{t}</span>)}</span>
                               : <span className="si-muted">—</span>}</td>
                             <td>
+                              <button className="si-remove-btn" type="button"
+                                style={{ marginRight: 6, background: "#fff", color: "#111827", border: "1px solid #e5e7eb" }}
+                                onClick={() => setEditingField(editingField === name ? null : name)}>
+                                <EditOutlinedIcon sx={{ fontSize: 14 }} />Edit
+                              </button>
                               <button className="si-remove-btn" type="button" onClick={() => removeField(name)}>
                                 <DeleteOutlinedIcon sx={{ fontSize: 14 }} />Remove
                               </button>
@@ -1108,7 +1136,7 @@ export function CreateDomainTab({ onAdd, registry = {}, domainNames = [], onQuic
                             const fkFieldName = relatedExists ? `${d.relatedDomain}Id` : parentIdField;
                             return (
                             <tr>
-                              <td colSpan={8} style={{ padding: "0 0 0 24px", background: "var(--color-background-secondary)" }}>
+                              <td colSpan={6} style={{ padding: "0 0 0 24px", background: "var(--color-background-secondary)" }}>
                                 <div style={{
                                   margin: "8px 12px 8px 0",
                                   border: "1px solid #c7d2fe",
@@ -1194,8 +1222,13 @@ export function CreateDomainTab({ onAdd, registry = {}, domainNames = [], onQuic
               linger from whatever was being typed for the previous
               domain. */}
           <FieldBuilder
-            key={domainName}
-            submitLabel="Add field" onSubmit={handleAddField} showAllLayers={false} showLabelOnly
+            key={`${domainName}:${editingField ?? "__new__"}`}
+            submitLabel={editingField ? "Save changes" : "Add field"}
+            initialName={editingField ?? undefined}
+            initialDraft={editingField ? fields[editingField] : undefined}
+            onSubmit={editingField ? (n, d) => handleEditField(editingField, n, d) : handleAddField}
+            onCancel={editingField ? () => setEditingField(null) : undefined}
+            showAllLayers={false} showLabelOnly
             registry={registry} domainNames={domainNames} parentDomainName={domainName}
             onNewDomainFromRelation={onQuickCreateDomain}
             onCreateRelatedDomain={handleCreateRelatedDomain}
@@ -1208,24 +1241,12 @@ export function CreateDomainTab({ onAdd, registry = {}, domainNames = [], onQuic
             <button className="btn btn-create-domain" type="button" onClick={createDomain} disabled={!canCreate}>
               {status.state === "loading"
                 ? <><span className="si-spinner" />Creating tables...</>
-                : status.state === "ok" && hasFields
+                : status.state === "ok" && hasFields && !returnedToParent
                   ? <><CheckIcon sx={{ fontSize: 16 }} />Domains Created</>
                   : <><CloudUploadOutlinedIcon sx={{ fontSize: 16 }} />Create Domain</>}
             </button>
-            {draftOrder.length > 0 && (
-              <button
-                className="btn btn-create-domain"
-                type="button"
-                onClick={createAllDomains}
-                disabled={!canCreate}
-                title={`Creates ${domainName}, then ${draftOrder.slice().reverse().join(", ")} — in that order`}
-                style={{ background: "#0f766e" }}
-              >
-                {status.state === "loading"
-                  ? <><span className="si-spinner" />Creating all...</>
-                  : <><CloudUploadOutlinedIcon sx={{ fontSize: 16 }} />Create All ({draftOrder.length + 1})</>}
-              </button>
-            )}
+            {/* "Create All" is hidden for now — createAllDomains is kept above
+                and can be re-enabled by restoring the button here. */}
             {/* Saves the definition to the database and stops there —
                 no CREATE TABLE, no columns, nothing in the schema list.
                 Submit the draft (below) when it's ready to become real

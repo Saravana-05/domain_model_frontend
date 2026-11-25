@@ -21,6 +21,8 @@ import {
   apiUpdateField,
   frontendTypeToBackend,
   apiSaveAttribute,
+  displayDomainName,
+  isJunctionTable,
   apiSaveAttributeTranslation,
   apiListValidationRules,
   apiSaveValidationRule,
@@ -275,20 +277,41 @@ const didAutoLoad = useRef(false);
     }
   }
 
+  // Markers are stored per PROJECT: "<projectId>|<DomainName>". Keyed by the
+  // bare domain name they leaked across projects — an old Client.output from
+  // one project reappeared on every other project's "Client".
+  const markerScope = () => `${currentProjectId ?? "none"}|`;
+
   function saveRelationMarker(domainName: string, fieldName: string, field: DomainFieldCore) {
     try {
       const all = loadRelationMarkers();
-      all[domainName] = { ...(all[domainName] ?? {}), [fieldName]: field };
+      const key = markerScope() + displayDomainName(domainName);
+      all[key] = { ...(all[key] ?? {}), [fieldName]: field };
       localStorage.setItem(RELATION_MARKERS_KEY, JSON.stringify(all));
     } catch { /* ignore quota errors */ }
   }
 
-  function removeRelationMarker(domainName: string, fieldName: string) {
+  /** Move one old un-scoped marker into the current project's scope, so it
+   *  stops being offered to every other project (and a later Delete sticks). */
+  function claimLegacyMarker(domainName: string, fieldName: string, field: DomainFieldCore) {
     try {
       const all = loadRelationMarkers();
       if (all[domainName]) {
         delete all[domainName][fieldName];
         if (Object.keys(all[domainName]).length === 0) delete all[domainName];
+        localStorage.setItem(RELATION_MARKERS_KEY, JSON.stringify(all));
+      }
+    } catch { /* ignore */ }
+    saveRelationMarker(domainName, fieldName, field);
+  }
+
+  function removeRelationMarker(domainName: string, fieldName: string) {
+    try {
+      const all = loadRelationMarkers();
+      const key = markerScope() + displayDomainName(domainName);
+      if (all[key]) {
+        delete all[key][fieldName];
+        if (Object.keys(all[key]).length === 0) delete all[key];
         localStorage.setItem(RELATION_MARKERS_KEY, JSON.stringify(all));
       }
     } catch { /* ignore */ }
@@ -1816,14 +1839,61 @@ function handleViewConfig(domainName: string, cfg: DomainViewConfig) {
       if (Object.keys(savedMarkers).length > 0) {
         setExtra((prev) => {
           const nextExtraFields = { ...prev.extraFields };
-          for (const [domName, markerFields] of Object.entries(savedMarkers)) {
-            // Only rehydrate markers for domains that actually exist —
-            // avoids resurrecting stale markers for deleted/renamed domains.
-            const domainKnown =
-              prev.newDomains.some((d) => d.name === domName) ||
-              Object.keys(nextExtraFields).includes(domName);
-            if (!domainKnown) continue;
-            nextExtraFields[domName] = { ...(nextExtraFields[domName] ?? {}), ...markerFields };
+          const scope = markerScope();
+          const norm = (n: string) => displayDomainName(n).toLowerCase();
+          const inThisProject = (key: string) =>
+            !currentProjectId || prev.projectIds[key] === currentProjectId;
+
+          // Domains are keyed by their backend TABLE name ("Client__12" when
+          // another project already owns "Client"), but markers are saved
+          // under the plain name ("Client"). Resolve the plain name to the
+          // key of THIS project's domain — otherwise the link is attached to
+          // some other project's "Client" and never shows up here.
+          const keyFor = (name: string): string | null => {
+            const matches = prev.newDomains.filter((d) => norm(d.name) === norm(name));
+            return (matches.find((d) => inThisProject(d.name)) ?? null)?.name ?? null;
+          };
+          const fieldsOf = (key: string) =>
+            Object.keys(prev.newDomains.find((d) => d.name === key)?.fields ?? {}).map((f) => f.toLowerCase());
+
+          // Junction tables that belong to THIS project (their names carry no
+          // project suffix, so ownership comes from the project id).
+          const junctionNames = new Set(
+            prev.newDomains
+              .filter((d) => inThisProject(d.name) && isJunctionTable(d.name, Object.keys(d.fields)))
+              .map((d) => norm(d.name)),
+          );
+
+          // A saved link is only real if the database backs it up in THIS
+          // project: many-to-many needs its junction table, "referenced by"
+          // needs the FK column on the other domain.
+          const backedByDb = (domName: string, f: DomainFieldCore): boolean => {
+            const rel = f.relatedDomain;
+            if (!rel) return false;
+            const relKey = keyFor(rel);
+            if (!relKey) return false;
+            if (f.relationKind === "integral") return fieldsOf(relKey).includes(`${norm(domName)}id`);
+            return junctionNames.has(`${norm(domName)}_${norm(rel)}`) || junctionNames.has(`${norm(rel)}_${norm(domName)}`);
+          };
+
+          for (const [markerKey, markerFields] of Object.entries(savedMarkers)) {
+            const isScoped = markerKey.includes("|");
+            // Scoped entries belong to one project. Legacy (un-scoped) entries
+            // came from before that existed and may belong to ANY project, so
+            // they are adopted only where the database confirms the link.
+            if (isScoped && !markerKey.startsWith(scope)) continue;
+            const domName = isScoped ? markerKey.slice(scope.length) : markerKey;
+            const domKey = keyFor(domName);
+            if (!domKey) continue;
+            const accepted: Record<string, DomainFieldCore> = {};
+            for (const [fname, fdef] of Object.entries(markerFields as Record<string, DomainFieldCore>)) {
+              if (isScoped || backedByDb(domName, fdef)) {
+                accepted[fname] = fdef;
+                if (!isScoped) claimLegacyMarker(domName, fname, fdef); // move into this project's scope
+              }
+            }
+            if (Object.keys(accepted).length === 0) continue;
+            nextExtraFields[domKey] = { ...(nextExtraFields[domKey] ?? {}), ...accepted };
           }
           return { ...prev, extraFields: nextExtraFields };
         });
